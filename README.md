@@ -1,3 +1,15 @@
+# WARNING
+
+## Hold up!
+**I do not recommend that you use this yet!**
+
+## Why?
+
+This needs a lot more testing on an empty account or super limited IAM credential set.
+It will be done soon, haven't had the time to test it properly yet.
+
+
+
 # AWS Static Site Deployment Toolkit
 
 This repository contains an a "Static Site Deployment Toolkit," intended to help in deploying and managing static websites using
