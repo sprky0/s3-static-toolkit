@@ -1,0 +1,117 @@
+<svg width="500" height="300" viewBox="0 0 500 300" xmlns="http://www.w3.org/2000/svg">
+
+  <!-- Background -->
+  <rect width="500" height="300" fill="#f5f5f5" rx="15" ry="15"/>
+  
+  <!-- AWS Cloud -->
+  <path d="M390,120 C420,100 440,150 410,165 C445,175 430,215 400,205 C390,235 350,235 340,205 C310,235 270,210 290,180 C260,170 275,130 305,135 C305,105 345,105 350,130 C360,115 380,110 390,120 Z" fill="#FF9900" opacity="0.7"/>
+  
+  <!-- S3 Bucket -->
+  <rect x="330" y="145" width="40" height="50" rx="5" ry="5" fill="#232F3E" stroke="#888" stroke-width="2"/>
+  <text x="350" y="175" font-family="Arial" font-size="12" fill="white" text-anchor="middle">S3</text>
+  
+  <!-- CloudFront -->
+  <polygon points="270,145 290,125 310,145 290,165" fill="#232F3E" stroke="#888" stroke-width="2"/>
+  <text x="290" y="145" font-family="Arial" font-size="10" fill="white" text-anchor="middle">CF</text>
+  
+  <!-- Route53 -->
+  <circle cx="230" cy="145" r="20" fill="#232F3E" stroke="#888" stroke-width="2"/>
+  <text x="230" y="150" font-family="Arial" font-size="10" fill="white" text-anchor="middle">R53</text>
+  
+  <!-- ACM -->
+  <rect x="280" y="175" width="40" height="30" rx="15" ry="15" fill="#232F3E" stroke="#888" stroke-width="2"/>
+  <text x="300" y="195" font-family="Arial" font-size="10" fill="white" text-anchor="middle">ACM</text>
+  
+  <!-- Developer and Website -->
+  <circle cx="100" cy="145" r="30" fill="#4287f5"/>
+  <text x="100" y="150" font-family="Arial" font-size="12" fill="white" text-anchor="middle">You</text>
+  
+  <!-- Device -->
+  <rect x="170" y="135" width="30" height="20" rx="3" ry="3" fill="#333"/>
+  <rect x="175" y="140" width="20" height="10" fill="#6fc2b0"/>
+  <text x="185" y="178" font-family="Arial" font-size="10" fill="#333" text-anchor="middle">Browser</text>
+  
+  <!-- Arrows -->
+  <path d="M130,145 L160,145" stroke="#333" stroke-width="2" fill="none" marker-end="url(#arrowhead)"/>
+  <path d="M200,145 L210,145" stroke="#333" stroke-width="2" fill="none" marker-end="url(#arrowhead)"/>
+  <path d="M250,145 L270,145" stroke="#333" stroke-width="2" fill="none" marker-end="url(#arrowhead)"/>
+  <path d="M310,145 L330,145" stroke="#333" stroke-width="2" fill="none" marker-end="url(#arrowhead)"/>
+  
+  <!-- Script -->
+  <rect x="80" y="195" width="100" height="60" rx="10" ry="10" fill="#4CAF50" stroke="#333" stroke-width="2"/>
+  <text x="130" y="225" font-family="Arial" font-size="12" fill="white" text-anchor="middle" font-weight="bold">One-Command
+  Deployment</text>
+  <path d="M130,195 L190,145" stroke="#333" stroke-width="2" fill="none" stroke-dasharray="5,5"/>
+  
+  <!-- Sun/Happy face -->
+  <circle cx="420" cy="80" r="25" fill="#FFEB3B"/>
+  <circle cx="410" cy="75" r="3" fill="#333"/>
+  <circle cx="430" cy="75" r="3" fill="#333"/>
+  <path d="M410,90 Q420,100 430,90" stroke="#333" stroke-width="2" fill="none"/>
+  
+  <!-- Status File -->
+  <rect x="370" y="205" width="70" height="40" rx="5" ry="5" fill="white" stroke="#333" stroke-width="1"/>
+  <text x="405" y="230" font-family="Arial" font-size="8" fill="#333" text-anchor="middle">status.json</text>
+  <path d="M330,245 L370,225" stroke="#888" stroke-width="2" fill="none" stroke-dasharray="3,3"/>
+  
+  <!-- Definitions for markers -->
+  <defs>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#333"/>
+    </marker>
+  </defs>
+</svg>
+
+<svg width="500" height="300" viewBox="0 0 500 300" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background -->
+  <rect width="500" height="300" fill="#f5f5f5" rx="15" ry="15"/>
+  
+  <!-- Timeline -->
+  <line x1="100" y1="150" x2="400" y2="150" stroke="#333" stroke-width="4"/>
+  
+  <!-- Steps -->
+  <circle cx="120" cy="150" r="15" fill="#4CAF50"/>
+  <text x="120" y="155" font-family="Arial" font-size="12" fill="white" text-anchor="middle">1</text>
+  <text x="120" y="180" font-family="Arial" font-size="10" fill="#333" text-anchor="middle">S3 Bucket</text>
+  
+  <circle cx="180" cy="150" r="15" fill="#2196F3"/>
+  <text x="180" y="155" font-family="Arial" font-size="12" fill="white" text-anchor="middle">2</text>
+  <text x="180" y="180" font-family="Arial" font-size="10" fill="#333" text-anchor="middle">ACM Cert</text>
+  
+  <circle cx="240" cy="150" r="15" fill="#FF9800"/>
+  <text x="240" y="155" font-family="Arial" font-size="12" fill="white" text-anchor="middle">3</text>
+  <text x="240" y="180" font-family="Arial" font-size="10" fill="#333" text-anchor="middle">OAC Setup</text>
+  
+  <circle cx="300" cy="150" r="15" fill="#9C27B0"/>
+  <text x="300" y="155" font-family="Arial" font-size="12" fill="white" text-anchor="middle">4</text>
+  <text x="300" y="180" font-family="Arial" font-size="10" fill="#333" text-anchor="middle">CloudFront</text>
+  
+  <circle cx="360" cy="150" r="15" fill="#F44336"/>
+  <text x="360" y="155" font-family="Arial" font-size="12" fill="white" text-anchor="middle">5</text>
+  <text x="360" y="180" font-family="Arial" font-size="10" fill="#333" text-anchor="middle">Route53</text>
+  
+  <!-- Script Title -->
+  <rect x="150" y="60" width="200" height="40" rx="20" ry="20" fill="#4CAF50"/>
+  <text x="250" y="85" font-family="Arial" font-size="16" fill="white" text-anchor="middle" font-weight="bold">Deployment Process</text>
+  
+  <!-- Time indication -->
+  <text x="120" y="210" font-family="Arial" font-size="10" fill="#666" text-anchor="middle">1-2 min</text>
+  <text x="180" y="210" font-family="Arial" font-size="10" fill="#666" text-anchor="middle">5-10 min</text>
+  <text x="240" y="210" font-family="Arial" font-size="10" fill="#666" text-anchor="middle">1 min</text>
+  <text x="300" y="210" font-family="Arial" font-size="10" fill="#666" text-anchor="middle">5-7 min</text>
+  <text x="360" y="210" font-family="Arial" font-size="10" fill="#666" text-anchor="middle">1-2 min</text>
+  
+  <!-- Total Time -->
+  <text x="250" y="240" font-family="Arial" font-size="14" fill="#333" text-anchor="middle">Total Deployment Time: ~15-20 minutes</text>
+  
+  <!-- Happy Cloud -->
+  <path d="M70,90 C80,75 100,75 110,90 C125,70 150,85 140,105 C155,115 140,140 125,130 C120,145 90,145 85,130 C65,140 55,115 70,105 C60,95 65,80 70,90 Z" fill="#D3D3D3" opacity="0.7"/>
+  <circle cx="85" cy="105" r="5" fill="white"/>
+  <circle cx="115" cy="105" r="5" fill="white"/>
+  <path d="M90,120 Q100,130 110,120" stroke="white" stroke-width="2" fill="none"/>
+  
+  <!-- Terminal -->
+  <rect x="330" y="80" width="100" height="30" rx="5" ry="5" fill="#333"/>
+  <text x="380" y="100" font-family="monospace" font-size="12" fill="#0F0" text-anchor="middle">./deploy.sh</text>
+
+</svg>
