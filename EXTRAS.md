@@ -109,11 +109,3 @@ A typical redirect deployment involves:
 
 If a deployment is interrupted, simply run the script again with the same parameters. The script tracks progress in the status file and will resume from where it left off.
 
-## Integration with Static Site Toolkit
-
-The redirect script complements the static site deployment script, allowing you to:
-
-1. Deploy your main website using `deploy-static-site.sh`
-2. Set up redirects from alternate domains using `aws-redirect-deploy.sh`
-
-This combination provides a complete solution for managing both your primary website and any additional domains that should redirect to it.

@@ -9,7 +9,6 @@ This needs a lot more testing on an empty account or super limited IAM credentia
 It will be done soon, haven't had the time to test it properly yet.
 
 
-
 # AWS Static Site Deployment Toolkit
 
 This repository contains an a "Static Site Deployment Toolkit," intended to help in deploying and managing static websites using
@@ -28,25 +27,13 @@ routing through Route53.
 - **Complete cleanup tool** to remove all created resources
 
 
-## Prerequisites
+## Prerequisites and Installation
 
 - AWS CLI installed and configured with appropriate permissions
 - `jq` command-line JSON processor
 - An existing Route53 hosted zone for your domain
 - Bash shell environment
-
-
-## Installation
-
-Clone this repository to get started:
-
-```bash
-git clone https://github.com/yourusername/aws-static-site-toolkit.git
-cd aws-static-site-toolkit
-chmod +x deploy-static-site.sh remove-static-site.sh
-```
-
-Ensure that both jq and awscli tools are installed on your local environment.
+- Clone this repository, export your creds, run login.sh
 
 
 ## Usage
