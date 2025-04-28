@@ -417,7 +417,7 @@ remove_s3_bucket() {
       
       if step_exists "upload_sample_content"; then
         mark_as_removed "upload_sample_content"
-      }
+      fi
       
       return 0
     fi
