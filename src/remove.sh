@@ -1,606 +1,565 @@
 #!/bin/bash
-
-# AWS Static Site Removal Script
-# This script removes all resources created by the static site deployment script
-
-set -e
+# =============================================================================
+# AWS Resource Cleanup Script
+# 
+# This script removes all AWS resources created by the deployment scripts
+# based on the JSON status file.
+#
+# Usage: ./cleanup.sh --status-file status.json [options]
+# Options:
+#   --status-file FILE     Path to the status JSON file (required)
+#   --profile PROFILE      AWS CLI profile (optional)
+#   --yes                  Skip all confirmation prompts
+# =============================================================================
 
 # Color definitions
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 BLUE='\033[0;34m'
+MAGENTA='\033[0;35m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
 NC='\033[0m' # No Color
 
 # Default values
-AUTO_CONFIRM=false
-STATUS_FILE="deployment_status.json"
+AWS_PROFILE=""
+STATUS_FILE=""
+AUTO_APPROVE=false
 
-# Function to display usage information
+# Function to display script usage
 usage() {
-  echo "Usage: $0 [options]"
-  echo ""
-  echo "Options:"
-  echo "  --status-file <file>  Status file from deployment (default: deployment_status.json)"
-  echo "  --profile <profile>   AWS CLI profile to use"
-  echo "  --region <region>     AWS region (default: us-east-1)"
-  echo "  -y, --yes             Skip all confirmation prompts"
-  echo "  --help                Display this help message"
-  exit 1
+    echo -e "${BOLD}Usage:${NC} $0 --status-file status.json [options]"
+    echo -e "${BOLD}Options:${NC}"
+    echo "  --status-file FILE     Path to the status JSON file (required)"
+    echo "  --profile PROFILE      AWS CLI profile (optional)"
+    echo "  --yes                  Skip all confirmation prompts"
+    exit 1
 }
 
-# Function to log messages with timestamp
+# Function to display messages with timestamp
 log() {
-  local level=$1
-  local message=$2
-  local timestamp=$(date "+%Y-%m-%d %H:%M:%S")
-  
-  case $level in
-    "INFO")
-      echo -e "${BLUE}[INFO]${NC} $timestamp - $message"
-      ;;
-    "SUCCESS")
-      echo -e "${GREEN}[SUCCESS]${NC} $timestamp - $message"
-      ;;
-    "WARN")
-      echo -e "${YELLOW}[WARNING]${NC} $timestamp - $message"
-      ;;
-    "ERROR")
-      echo -e "${RED}[ERROR]${NC} $timestamp - $message"
-      ;;
-    *)
-      echo "$timestamp - $message"
-      ;;
-  esac
-}
-
-# Function to confirm with the user
-confirm() {
-  local message=$1
-  
-  if [ "$AUTO_CONFIRM" = true ]; then
-    return 0
-  fi
-  
-  echo -e "${YELLOW}$message (Y/n)${NC}"
-  read -r answer
-  
-  if [ "$answer" = "n" ] || [ "$answer" = "N" ]; then
-    return 1
-  else
-    return 0
-  fi
-}
-
-# Function to get metadata from the status file
-get_metadata() {
-  local step=$1
-  local key=$2
-  
-  if [ ! -f "$STATUS_FILE" ]; then
-    log "ERROR" "Status file not found: $STATUS_FILE"
-    return 1
-  fi
-  
-  local value=$(jq -r --arg step "$step" --arg key "$key" '.steps[$step].metadata[$key] // empty' "$STATUS_FILE")
-  
-  if [ -z "$value" ] || [ "$value" = "null" ]; then
-    return 1
-  fi
-  
-  echo "$value"
-}
-
-# Function to check if a step exists in the status file
-step_exists() {
-  local step=$1
-  
-  if [ ! -f "$STATUS_FILE" ]; then
-    return 1
-  fi
-  
-  local status=$(jq -r --arg step "$step" '.steps[$step].status // "NOT_FOUND"' "$STATUS_FILE")
-  
-  if [ "$status" = "NOT_FOUND" ]; then
-    return 1
-  else
-    return 0
-  fi
-}
-
-# Function to update the status file after removal
-mark_as_removed() {
-  local step=$1
-  
-  if [ ! -f "$STATUS_FILE" ]; then
-    return 1
-  fi
-  
-  jq --arg step "$step" '.steps[$step].status = "REMOVED" | .steps[$step].removed_at = "'$(date -u +"%Y-%m-%dT%H:%M:%SZ")'"}' "$STATUS_FILE" > "${STATUS_FILE}.tmp"
-  mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
-}
-
-# Function to remove CloudFront invalidation
-remove_cloudfront_invalidation() {
-  log "INFO" "CloudFront invalidations are automatically removed after 15 minutes"
-  log "SUCCESS" "No action needed for invalidation removal"
-  
-  if step_exists "invalidate_cloudfront_cache"; then
-    mark_as_removed "invalidate_cloudfront_cache"
-  fi
-  
-  return 0
-}
-
-# Function to remove Route53 record
-remove_route53_record() {
-  local domain=$(jq -r '.domain // empty' "$STATUS_FILE")
-  
-  if [ -z "$domain" ]; then
-    log "WARN" "Domain not found in status file"
-    return 1
-  fi
-  
-  local distribution_domain=$(get_metadata "create_cloudfront_distribution" "distribution_domain")
-  
-  if [ -z "$distribution_domain" ]; then
-    log "WARN" "CloudFront distribution domain not found in status file"
-    return 1
-  fi
-  
-  log "INFO" "Removing Route53 record for $domain..."
-  
-  if confirm "Remove Route53 record for '$domain'?"; then
-    # Find hosted zone
-    local hosted_zones=$(aws route53 list-hosted-zones $AWS_PROFILE_ARG $AWS_REGION_ARG)
-    local zone_id=""
+    local level=$1
+    local message=$2
+    local timestamp=$(date "+%Y-%m-%d %H:%M:%S")
     
-    # Find the most specific zone for this domain
-    for zone in $(echo "$hosted_zones" | jq -r '.HostedZones[].Id'); do
-      # Extract just the ID without the /hostedzone/ prefix
-      local clean_zone_id=$(echo "$zone" | sed 's|/hostedzone/||')
-      local zone_name=$(aws route53 get-hosted-zone --id "$zone" $AWS_PROFILE_ARG $AWS_REGION_ARG | jq -r '.HostedZone.Name')
-      
-      # Remove trailing dot from zone name for comparison
-      zone_name=${zone_name%?}
-      
-      if [[ "$domain" == *"$zone_name"* ]]; then
-        zone_id=$clean_zone_id
-        break
-      fi
+    case $level in
+        "INFO") 
+            echo -e "${BLUE}[INFO]${NC} ${timestamp} - ${message}"
+            ;;
+        "SUCCESS") 
+            echo -e "${GREEN}[SUCCESS]${NC} ${timestamp} - ${message}"
+            ;;
+        "WARN") 
+            echo -e "${YELLOW}[WARNING]${NC} ${timestamp} - ${message}"
+            ;;
+        "ERROR") 
+            echo -e "${RED}[ERROR]${NC} ${timestamp} - ${message}"
+            ;;
+        "STEP") 
+            echo -e "\n${MAGENTA}[STEP]${NC} ${timestamp} - ${BOLD}${message}${NC}"
+            ;;
+    esac
+}
+
+# Function to confirm action with user
+confirm_action() {
+    local message=$1
+    
+    if [ "$AUTO_APPROVE" = true ]; then
+        return 0
+    fi
+    
+    echo -e "${YELLOW}${message} (y/n)${NC}"
+    read -r response
+    if [[ "$response" =~ ^([yY][eE][sS]|[yY])$ ]]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Function to check for required commands
+check_prerequisites() {
+    log "STEP" "Checking prerequisites"
+    
+    local missing_tools=()
+    
+    for tool in aws jq; do
+        if ! command -v $tool &> /dev/null; then
+            missing_tools+=($tool)
+        fi
     done
     
-    if [ -z "$zone_id" ]; then
-      log "ERROR" "Could not find Route53 hosted zone for $domain"
-      return 1
+    if [ ${#missing_tools[@]} -ne 0 ]; then
+        log "ERROR" "Missing required tools: ${missing_tools[*]}"
+        log "INFO" "Please install the required tools and try again."
+        exit 1
     fi
     
-    # Get the current record
-    local records=$(aws route53 list-resource-record-sets --hosted-zone-id "$zone_id" $AWS_PROFILE_ARG $AWS_REGION_ARG)
-    local record=$(echo "$records" | jq -r --arg domain "$domain." '.ResourceRecordSets[] | select(.Name==$domain and .Type=="A" and .AliasTarget != null)')
-    
-    if [ -z "$record" ]; then
-      log "WARN" "Route53 record not found for $domain"
-      
-      if step_exists "create_route53_record"; then
-        mark_as_removed "create_route53_record"
-      fi
-      
-      return 0
-    fi
-    
-    # Create change batch for deletion
-    local change_batch="{
-      \"Changes\": [
-        {
-          \"Action\": \"DELETE\",
-          \"ResourceRecordSet\": $record
-        }
-      ]
-    }"
-    
-    aws route53 change-resource-record-sets \
-      --hosted-zone-id "$zone_id" \
-      --change-batch "$change_batch" \
-      $AWS_PROFILE_ARG $AWS_REGION_ARG
-    
-    if [ $? -ne 0 ]; then
-      log "ERROR" "Failed to remove Route53 record"
-      return 1
-    fi
-    
-    log "SUCCESS" "Route53 record removed for $domain"
-    
-    if step_exists "create_route53_record"; then
-      mark_as_removed "create_route53_record"
-    fi
-    
-    # Wait a bit for DNS propagation
-    log "INFO" "Waiting for DNS changes to propagate..."
-    sleep 10
-    
-    return 0
-  else
-    log "WARN" "Route53 record removal cancelled by user"
-    return 1
-  fi
+    log "SUCCESS" "All required tools are installed"
 }
 
-# Function to remove CloudFront distribution
-remove_cloudfront_distribution() {
-  local distribution_id=$(get_metadata "create_cloudfront_distribution" "distribution_id")
-  
-  if [ -z "$distribution_id" ]; then
-    log "WARN" "CloudFront distribution ID not found in status file"
-    return 1
-  fi
-  
-  log "INFO" "Removing CloudFront distribution $distribution_id..."
-  
-  if confirm "Remove CloudFront distribution '$distribution_id'?"; then
-    # Get current config to check if it's disabled
-    local distribution_config=$(aws cloudfront get-distribution-config \
-      --id "$distribution_id" $AWS_PROFILE_ARG $AWS_REGION_ARG)
+# Function to validate status file
+validate_status_file() {
+    log "STEP" "Validating status file"
     
-    local enabled=$(echo "$distribution_config" | jq -r '.DistributionConfig.Enabled')
-    local etag=$(echo "$distribution_config" | jq -r '.ETag')
+    if [ ! -f "$STATUS_FILE" ]; then
+        log "ERROR" "Status file does not exist: $STATUS_FILE"
+        exit 1
+    fi
     
-    # Disable the distribution if it's enabled
-    if [ "$enabled" = "true" ]; then
-      log "INFO" "Disabling CloudFront distribution before deletion..."
-      
-      # Update the config to disable the distribution
-      local updated_config=$(echo "$distribution_config" | jq '.DistributionConfig.Enabled = false')
-      
-      aws cloudfront update-distribution \
-        --id "$distribution_id" \
-        --if-match "$etag" \
-        --distribution-config "$(echo "$updated_config" | jq '.DistributionConfig')" \
-        $AWS_PROFILE_ARG $AWS_REGION_ARG
-      
-      if [ $? -ne 0 ]; then
-        log "ERROR" "Failed to disable CloudFront distribution"
-        return 1
-      fi
-      
-      log "INFO" "CloudFront distribution disabled. Waiting for deployment..."
-      
-      # Wait for the distribution to be deployed with the disabled state
-      if confirm "Wait for CloudFront distribution to be disabled? This may take 5-10 minutes."; then
-        aws cloudfront wait distribution-deployed \
-          --id "$distribution_id" \
-          $AWS_PROFILE_ARG $AWS_REGION_ARG
-        
-        if [ $? -ne 0 ]; then
-          log "WARN" "CloudFront distribution is taking longer than expected to update"
+    if ! jq empty "$STATUS_FILE" 2>/dev/null; then
+        log "ERROR" "Status file is not valid JSON: $STATUS_FILE"
+        exit 1
+    fi
+    
+    log "SUCCESS" "Status file is valid"
+}
+
+# Function to remove CloudFront distributions
+remove_cloudfront_distributions() {
+    log "STEP" "Removing CloudFront distributions"
+    
+    local aws_cmd="aws"
+    if [ -n "$AWS_PROFILE" ]; then
+        aws_cmd="$aws_cmd --profile $AWS_PROFILE"
+    fi
+    
+    # Try to get distributions from different status file formats
+    local distributions_json=$(jq -r '.distributions // {}' "$STATUS_FILE")
+    if [ "$(echo "$distributions_json" | jq 'length')" -eq 0 ]; then
+        # Alternative format: check for a single distribution
+        local distribution_id=$(jq -r '.distribution_id // ""' "$STATUS_FILE")
+        if [ -n "$distribution_id" ]; then
+            distributions_json="{\"main\": {\"id\": \"$distribution_id\"}}"
         fi
-      else
-        log "WARN" "Skipping wait for CloudFront distribution update"
-      fi
-      
-      # Get the updated etag
-      distribution_config=$(aws cloudfront get-distribution-config \
-        --id "$distribution_id" $AWS_PROFILE_ARG $AWS_REGION_ARG)
-      
-      etag=$(echo "$distribution_config" | jq -r '.ETag')
     fi
     
-    # Delete the distribution
-    log "INFO" "Deleting CloudFront distribution..."
-    aws cloudfront delete-distribution \
-      --id "$distribution_id" \
-      --if-match "$etag" \
-      $AWS_PROFILE_ARG $AWS_REGION_ARG
-    
-    if [ $? -ne 0 ]; then
-      log "ERROR" "Failed to delete CloudFront distribution. It might still be in use or not fully disabled."
-      return 1
+    if [ "$(echo "$distributions_json" | jq 'length')" -eq 0 ]; then
+        log "INFO" "No CloudFront distributions found in status file"
+        return 0
     fi
     
-    log "SUCCESS" "CloudFront distribution deleted"
-    
-    if step_exists "create_cloudfront_distribution"; then
-      mark_as_removed "create_cloudfront_distribution"
-    fi
-    
-    if step_exists "wait_for_distribution"; then
-      mark_as_removed "wait_for_distribution"
-    fi
-    
-    return 0
-  else
-    log "WARN" "CloudFront distribution removal cancelled by user"
-    return 1
-  fi
+    for domain in $(echo "$distributions_json" | jq -r 'keys[]'); do
+        local distribution_id=""
+        
+        # Handle both formats (object or string)
+        if echo "$distributions_json" | jq -e --arg domain "$domain" '.[$domain] | has("id")' > /dev/null; then
+            distribution_id=$(echo "$distributions_json" | jq -r --arg domain "$domain" '.[$domain].id')
+        else
+            distribution_id=$(echo "$distributions_json" | jq -r --arg domain "$domain" '.[$domain]')
+        fi
+        
+        if [ -z "$distribution_id" ] || [ "$distribution_id" = "null" ]; then
+            log "WARN" "Invalid distribution ID for $domain"
+            continue
+        fi
+        
+        log "INFO" "Processing CloudFront distribution: $distribution_id ($domain)"
+        
+        # Check if distribution exists
+        if ! $aws_cmd cloudfront get-distribution --id "$distribution_id" &>/dev/null; then
+            log "INFO" "Distribution $distribution_id does not exist, skipping"
+            continue
+        fi
+        
+        # Get the current ETag and configuration
+        local etag=$($aws_cmd cloudfront get-distribution --id "$distribution_id" --query "ETag" --output text)
+        local config=$($aws_cmd cloudfront get-distribution-config --id "$distribution_id" --query "DistributionConfig" --output json)
+        
+        # Disable the distribution
+        if [ "$(echo "$config" | jq '.Enabled')" = "true" ]; then
+            log "INFO" "Disabling distribution $distribution_id"
+            local disabled_config=$(echo "$config" | jq '.Enabled = false')
+            
+            $aws_cmd cloudfront update-distribution \
+                --id "$distribution_id" \
+                --distribution-config "$disabled_config" \
+                --if-match "$etag" \
+                >/dev/null
+            
+            if [ $? -ne 0 ]; then
+                log "ERROR" "Failed to disable distribution $distribution_id"
+                continue
+            fi
+            
+            log "INFO" "Waiting for distribution $distribution_id to be deployed after disabling (this may take 5-10 minutes)..."
+            $aws_cmd cloudfront wait distribution-deployed --id "$distribution_id"
+        else
+            log "INFO" "Distribution $distribution_id is already disabled"
+        fi
+        
+        # Delete the distribution
+        log "INFO" "Deleting distribution $distribution_id"
+        
+        # Get the current ETag again (it changes after update)
+        etag=$($aws_cmd cloudfront get-distribution --id "$distribution_id" --query "ETag" --output text)
+        
+        $aws_cmd cloudfront delete-distribution \
+            --id "$distribution_id" \
+            --if-match "$etag"
+        
+        if [ $? -eq 0 ]; then
+            log "SUCCESS" "Deleted CloudFront distribution $distribution_id"
+        else
+            log "ERROR" "Failed to delete CloudFront distribution $distribution_id"
+        fi
+    done
 }
 
-# Function to remove Origin Access Control
-remove_origin_access_control() {
-  local oac_id=$(get_metadata "create_origin_access_control" "oac_id")
-  
-  if [ -z "$oac_id" ]; then
-    log "WARN" "Origin Access Control ID not found in status file"
-    return 1
-  fi
-  
-  log "INFO" "Removing Origin Access Control $oac_id..."
-  
-  if confirm "Remove Origin Access Control?"; then
-    # First, get the etag for the OAC
-    local oac_config=$(aws cloudfront get-origin-access-control \
-      --id "$oac_id" $AWS_PROFILE_ARG $AWS_REGION_ARG)
+# Function to remove CloudFront Origin Access Controls
+remove_origin_access_controls() {
+    log "STEP" "Removing CloudFront Origin Access Controls"
     
-    local etag=$(echo "$oac_config" | jq -r '.ETag')
-    
-    # Delete the OAC
-    aws cloudfront delete-origin-access-control \
-      --id "$oac_id" \
-      --if-match "$etag" \
-      $AWS_PROFILE_ARG $AWS_REGION_ARG
-    
-    if [ $? -ne 0 ]; then
-      log "ERROR" "Failed to delete Origin Access Control. It might still be in use."
-      return 1
+    local aws_cmd="aws"
+    if [ -n "$AWS_PROFILE" ]; then
+        aws_cmd="$aws_cmd --profile $AWS_PROFILE"
     fi
     
-    log "SUCCESS" "Origin Access Control deleted"
-    
-    if step_exists "create_origin_access_control"; then
-      mark_as_removed "create_origin_access_control"
+    local oac_id=$(jq -r '.oac_id // ""' "$STATUS_FILE")
+    if [ -z "$oac_id" ] || [ "$oac_id" = "null" ]; then
+        log "INFO" "No Origin Access Control found in status file"
+        return 0
     fi
     
-    return 0
-  else
-    log "WARN" "Origin Access Control removal cancelled by user"
-    return 1
-  fi
+    log "INFO" "Removing Origin Access Control: $oac_id"
+    
+    # Check if OAC exists
+    if ! $aws_cmd cloudfront get-origin-access-control --id "$oac_id" &>/dev/null; then
+        log "INFO" "Origin Access Control $oac_id does not exist, skipping"
+        return 0
+    fi
+    
+    # Delete OAC
+    $aws_cmd cloudfront delete-origin-access-control --id "$oac_id"
+    
+    if [ $? -eq 0 ]; then
+        log "SUCCESS" "Deleted Origin Access Control $oac_id"
+    else
+        log "ERROR" "Failed to delete Origin Access Control $oac_id"
+    fi
 }
 
 # Function to remove ACM certificate
-remove_acm_certificate() {
-  local cert_arn=$(get_metadata "create_acm_certificate" "certificate_arn")
-  
-  if [ -z "$cert_arn" ]; then
-    log "WARN" "ACM certificate ARN not found in status file"
-    return 1
-  fi
-  
-  log "INFO" "Removing ACM certificate $cert_arn..."
-  
-  if confirm "Remove ACM certificate?"; then
-    aws acm delete-certificate \
-      --certificate-arn "$cert_arn" \
-      --region us-east-1 \
-      $AWS_PROFILE_ARG
+remove_certificate() {
+    log "STEP" "Removing ACM certificate"
     
-    if [ $? -ne 0 ]; then
-      log "ERROR" "Failed to delete ACM certificate. It might still be in use."
-      return 1
+    local aws_cmd="aws"
+    if [ -n "$AWS_PROFILE" ]; then
+        aws_cmd="$aws_cmd --profile $AWS_PROFILE"
     fi
     
-    log "SUCCESS" "ACM certificate deleted"
-    
-    if step_exists "create_acm_certificate"; then
-      mark_as_removed "create_acm_certificate"
+    local cert_arn=$(jq -r '.certificate_arn // ""' "$STATUS_FILE")
+    if [ -z "$cert_arn" ] || [ "$cert_arn" = "null" ]; then
+        log "INFO" "No certificate found in status file"
+        return 0
     fi
     
-    return 0
-  else
-    log "WARN" "ACM certificate removal cancelled by user"
-    return 1
-  fi
+    log "INFO" "Removing certificate: $cert_arn"
+    
+    # Certificate must be in us-east-1 for CloudFront
+    local cert_region="us-east-1"
+    
+    # Check if certificate exists
+    if ! $aws_cmd acm describe-certificate --certificate-arn "$cert_arn" --region "$cert_region" &>/dev/null; then
+        log "INFO" "Certificate $cert_arn does not exist, skipping"
+        return 0
+    fi
+    
+    # Delete certificate
+    $aws_cmd acm delete-certificate --certificate-arn "$cert_arn" --region "$cert_region"
+    
+    if [ $? -eq 0 ]; then
+        log "SUCCESS" "Deleted certificate $cert_arn"
+    else
+        log "ERROR" "Failed to delete certificate $cert_arn"
+    fi
 }
 
-# Function to empty and remove S3 bucket
-remove_s3_bucket() {
-  local bucket_name=$(get_metadata "create_s3_bucket" "bucket_name")
-  
-  if [ -z "$bucket_name" ]; then
-    log "WARN" "S3 bucket name not found in status file"
-    return 1
-  fi
-  
-  log "INFO" "Removing S3 bucket $bucket_name..."
-  
-  if confirm "Empty and remove S3 bucket '$bucket_name'?"; then
-    # First, check if the bucket exists
-    if ! aws s3api head-bucket --bucket "$bucket_name" $AWS_PROFILE_ARG $AWS_REGION_ARG 2>/dev/null; then
-      log "WARN" "S3 bucket $bucket_name does not exist or you don't have access to it"
-      
-      if step_exists "create_s3_bucket"; then
-        mark_as_removed "create_s3_bucket"
-      fi
-      
-      if step_exists "update_bucket_policy"; then
-        mark_as_removed "update_bucket_policy"
-      fi
-      
-      if step_exists "upload_sample_content"; then
-        mark_as_removed "upload_sample_content"
-      fi
-      
-      return 0
+# Function to remove S3 buckets
+remove_s3_buckets() {
+    log "STEP" "Removing S3 buckets"
+    
+    local aws_cmd="aws"
+    if [ -n "$AWS_PROFILE" ]; then
+        aws_cmd="$aws_cmd --profile $AWS_PROFILE"
     fi
     
-    # Empty the bucket
-    log "INFO" "Emptying S3 bucket..."
-    aws s3 rm "s3://$bucket_name/" --recursive $AWS_PROFILE_ARG $AWS_REGION_ARG
+    # Try different bucket formats in status file
+    local buckets_to_remove=()
     
-    if [ $? -ne 0 ]; then
-      log "ERROR" "Failed to empty S3 bucket"
-      return 1
+    # Check for buckets object
+    local buckets_json=$(jq -r '.buckets // {}' "$STATUS_FILE")
+    if [ "$(echo "$buckets_json" | jq 'length')" -gt 0 ]; then
+        for domain in $(echo "$buckets_json" | jq -r 'keys[]'); do
+            local bucket_name=$(echo "$buckets_json" | jq -r --arg domain "$domain" '.[$domain]')
+            buckets_to_remove+=("$bucket_name")
+        done
     fi
     
-    # Delete the bucket
-    log "INFO" "Deleting S3 bucket..."
-    aws s3api delete-bucket --bucket "$bucket_name" $AWS_PROFILE_ARG $AWS_REGION_ARG
-    
-    if [ $? -ne 0 ]; then
-      log "ERROR" "Failed to delete S3 bucket"
-      return 1
+    # Check for single bucket
+    local single_bucket=$(jq -r '.bucket_name // ""' "$STATUS_FILE")
+    if [ -n "$single_bucket" ] && [ "$single_bucket" != "null" ]; then
+        buckets_to_remove+=("$single_bucket")
     fi
     
-    log "SUCCESS" "S3 bucket emptied and deleted"
-    
-    if step_exists "create_s3_bucket"; then
-      mark_as_removed "create_s3_bucket"
+    if [ ${#buckets_to_remove[@]} -eq 0 ]; then
+        log "INFO" "No S3 buckets found in status file"
+        return 0
     fi
     
-    if step_exists "update_bucket_policy"; then
-      mark_as_removed "update_bucket_policy"
-    fi
-    
-    if step_exists "upload_sample_content"; then
-      mark_as_removed "upload_sample_content"
-    fi
-    
-    return 0
-  else
-    log "WARN" "S3 bucket removal cancelled by user"
-    return 1
-  fi
+    for bucket in "${buckets_to_remove[@]}"; do
+        log "INFO" "Processing S3 bucket: $bucket"
+        
+        # Check if bucket exists
+        if ! $aws_cmd s3api head-bucket --bucket "$bucket" 2>/dev/null; then
+            log "INFO" "Bucket $bucket does not exist, skipping"
+            continue
+        fi
+        
+        # Empty the bucket first
+        log "INFO" "Emptying bucket $bucket"
+        $aws_cmd s3 rm "s3://$bucket" --recursive
+        
+        if [ $? -ne 0 ]; then
+            log "WARN" "Failed to completely empty bucket $bucket"
+        fi
+        
+        # Delete the bucket
+        log "INFO" "Deleting bucket $bucket"
+        $aws_cmd s3api delete-bucket --bucket "$bucket"
+        
+        if [ $? -eq 0 ]; then
+            log "SUCCESS" "Deleted S3 bucket $bucket"
+        else
+            log "ERROR" "Failed to delete S3 bucket $bucket"
+        fi
+    done
 }
 
-# Function to clean up status file
-cleanup_status_file() {
-  if confirm "Mark deployment as fully removed in the status file?"; then
-    # Add a summary section to the status file
-    jq '. + {"removal_completed": true, "removal_timestamp": "'$(date -u +"%Y-%m-%dT%H:%M:%SZ")'"}' "$STATUS_FILE" > "${STATUS_FILE}.tmp"
-    mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
+# Function to remove Route53 DNS records
+remove_dns_records() {
+    log "STEP" "Removing Route53 DNS records"
     
-    log "SUCCESS" "Status file updated with removal information"
-    return 0
-  else
-    return 0
-  fi
+    local aws_cmd="aws"
+    if [ -n "$AWS_PROFILE" ]; then
+        aws_cmd="$aws_cmd --profile $AWS_PROFILE"
+    fi
+    
+    # Get zones information
+    local zones_json="{}"
+    
+    # Check for zones object in status file
+    if jq -e '.zones' "$STATUS_FILE" > /dev/null; then
+        zones_json=$(jq -r '.zones' "$STATUS_FILE")
+    else
+        # Check for single zone
+        local zone_id=$(jq -r '.zone_id // ""' "$STATUS_FILE")
+        local domain=$(jq -r '.domain // ""' "$STATUS_FILE")
+        
+        if [ -n "$zone_id" ] && [ "$zone_id" != "null" ]; then
+            if [ -z "$domain" ] || [ "$domain" = "null" ]; then
+                domain="main"
+            fi
+            zones_json="{\"$domain\": \"$zone_id\"}"
+        fi
+    fi
+    
+    if [ "$(echo "$zones_json" | jq 'length')" -eq 0 ]; then
+        log "INFO" "No Route53 zones found in status file"
+        return 0
+    fi
+    
+    # Get domains information
+    local domains_json="[]"
+    
+    # Check for domains array in status file
+    if jq -e '.domains_array' "$STATUS_FILE" > /dev/null; then
+        domains_json=$(jq -r '.domains_array' "$STATUS_FILE")
+    else
+        # Check for single domain
+        local domain=$(jq -r '.domain // ""' "$STATUS_FILE")
+        if [ -n "$domain" ] && [ "$domain" != "null" ]; then
+            domains_json="[\"$domain\"]"
+        fi
+    fi
+    
+    # Add target domain if it exists
+    local target_domain=$(jq -r '.target_domain // ""' "$STATUS_FILE")
+    if [ -n "$target_domain" ] && [ "$target_domain" != "null" ]; then
+        domains_json=$(echo "$domains_json" | jq ". + [\"$target_domain\"]" 2>/dev/null || echo "$domains_json")
+    fi
+    
+    # Process each domain
+    for domain in $(echo "$domains_json" | jq -r '.[]'); do
+        log "INFO" "Processing DNS records for domain: $domain"
+        
+        # Find zone for domain
+        local zone_id=$(echo "$zones_json" | jq -r --arg domain "$domain" '.[$domain] // empty')
+        if [ -z "$zone_id" ]; then
+            # Try to find parent domain for subdomains
+            IFS='.' read -ra DOMAIN_PARTS <<< "$domain"
+            local parts_count=${#DOMAIN_PARTS[@]}
+            
+            if [ $parts_count -gt 2 ]; then
+                local parent_domain="${DOMAIN_PARTS[$(($parts_count-2))]}.${DOMAIN_PARTS[$(($parts_count-1))]}"
+                zone_id=$(echo "$zones_json" | jq -r --arg domain "$parent_domain" '.[$domain] // empty')
+            fi
+            
+            if [ -z "$zone_id" ]; then
+                log "WARN" "Could not find Route53 zone for $domain, skipping DNS record removal"
+                continue
+            fi
+        fi
+        
+        # Check if zone exists
+        if ! $aws_cmd route53 get-hosted-zone --id "$zone_id" &>/dev/null; then
+            log "INFO" "Hosted zone $zone_id does not exist, skipping"
+            continue
+        fi
+        
+        # Find A records pointing to CloudFront
+        log "INFO" "Finding A records for $domain in zone $zone_id"
+        
+        local records=$($aws_cmd route53 list-resource-record-sets \
+            --hosted-zone-id "$zone_id" \
+            --query "ResourceRecordSets[?Name=='${domain}.' && Type=='A']" \
+            --output json)
+        
+        if [ "$(echo "$records" | jq 'length')" -eq 0 ]; then
+            log "INFO" "No A records found for $domain in zone $zone_id"
+            continue
+        fi
+        
+        # Delete each record
+        local change_batch=$(echo "$records" | jq '{
+            Changes: [.[] | {
+                Action: "DELETE",
+                ResourceRecordSet: .
+            }]
+        }')
+        
+        log "INFO" "Deleting A records for $domain"
+        $aws_cmd route53 change-resource-record-sets \
+            --hosted-zone-id "$zone_id" \
+            --change-batch "$change_batch"
+        
+        if [ $? -eq 0 ]; then
+            log "SUCCESS" "Deleted A records for $domain"
+        else
+            log "ERROR" "Failed to delete A records for $domain"
+        fi
+    done
 }
 
 # Main execution
 main() {
-  # Parse command line arguments
-  while [[ $# -gt 0 ]]; do
-    key="$1"
-    
-    case $key in
-      --status-file)
-        STATUS_FILE="$2"
-        shift
-        shift
-        ;;
-      --profile)
-        AWS_PROFILE="$2"
-        AWS_PROFILE_ARG="--profile $AWS_PROFILE"
-        shift
-        shift
-        ;;
-      --region)
-        AWS_REGION="$2"
-        AWS_REGION_ARG="--region $AWS_REGION"
-        shift
-        shift
-        ;;
-      -y|--yes)
-        AUTO_CONFIRM=true
-        shift
-        ;;
-      --help)
-        usage
-        ;;
-      *)
-        echo "Unknown option: $1"
-        usage
-        ;;
-    esac
-  done
-  
-  # Check if status file exists
-  if [ ! -f "$STATUS_FILE" ]; then
-    log "ERROR" "Status file not found: $STATUS_FILE"
-    exit 1
-  fi
-  
-  # Check for required commands
-  for cmd in aws jq; do
-    if ! command -v $cmd &> /dev/null; then
-      log "ERROR" "Required command not found: $cmd"
-      exit 1
-    fi
-  done
-  
-  # Extract domain from status file if available
-  DOMAIN=$(jq -r '.domain // empty' "$STATUS_FILE")
-  if [ -z "$DOMAIN" ]; then
-    # Try to extract domain from bucket name
-    BUCKET_NAME=$(get_metadata "create_s3_bucket" "bucket_name")
-    if [ -n "$BUCKET_NAME" ]; then
-      DOMAIN=${BUCKET_NAME%-static-site}
-    fi
-  fi
-  
-  if [ -n "$DOMAIN" ]; then
-    log "INFO" "Starting removal of resources for domain: $DOMAIN"
-  else
-    log "INFO" "Starting removal of resources from status file: $STATUS_FILE"
-  fi
-  
-  # Display warning and confirmation
-  echo
-  echo -e "${RED}WARNING: This script will remove all AWS resources created by the deployment script.${NC}"
-  echo -e "${RED}This action cannot be undone. All data in the S3 bucket will be permanently deleted.${NC}"
-  echo
-  
-  if ! confirm "Do you want to proceed with removing all resources?"; then
-    log "INFO" "Removal cancelled by user"
-    exit 0
-  fi
-  
-  # Execute removal steps in reverse order
-  
-  # Step 1: Remove CloudFront invalidation (no actual removal needed)
-  remove_cloudfront_invalidation
-  
-  # Step 2: Remove Route53 record
-  remove_route53_record
-  
-  # Step 3: Remove CloudFront distribution
-  remove_cloudfront_distribution
-  
-  # Step 4: Remove Origin Access Control
-  remove_origin_access_control
-  
-  # Step 5: Remove ACM certificate
-  remove_acm_certificate
-  
-  # Step 6: Empty and remove S3 bucket
-  remove_s3_bucket
-  
-  # Step 7: Clean up status file
-  cleanup_status_file
-  
-  log "SUCCESS" "Resource removal completed!"
-  
-  # Print removal summary
-  echo
-  echo -e "${GREEN}===== REMOVAL SUMMARY =====${NC}"
-  echo "Status File: $STATUS_FILE"
-  
-  # Check if any steps failed
-  local failed_steps=$(jq -r '.steps | to_entries[] | select(.value.status != "REMOVED" and .value.status != "NOT_STARTED") | .key' "$STATUS_FILE")
-  
-  if [ -n "$failed_steps" ]; then
-    echo -e "${YELLOW}The following resources may need manual cleanup:${NC}"
-    echo "$failed_steps" | while read -r step; do
-      echo "- $step"
+    # Process command line arguments
+    while [[ $# -gt 0 ]]; do
+        key="$1"
+        case $key in
+            --status-file)
+                STATUS_FILE="$2"
+                shift
+                shift
+                ;;
+            --profile)
+                AWS_PROFILE="$2"
+                shift
+                shift
+                ;;
+            --yes)
+                AUTO_APPROVE=true
+                shift
+                ;;
+            --help)
+                usage
+                ;;
+            *)
+                echo "Unknown option: $1"
+                usage
+                ;;
+        esac
     done
+    
+    # Check for required parameters
+    if [ -z "$STATUS_FILE" ]; then
+        log "ERROR" "Status file is required"
+        usage
+    fi
+    
+    # Welcome message
+    echo -e "${CYAN}╔═══════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║            ${BOLD}AWS RESOURCE CLEANUP SCRIPT${NC}${CYAN}                     ║${NC}"
+    echo -e "${CYAN}╚═══════════════════════════════════════════════════════════╝${NC}"
     echo
-    echo -e "${YELLOW}Check the AWS Management Console to ensure all resources are properly removed.${NC}"
-  else
-    echo -e "${GREEN}All resources have been successfully removed.${NC}"
-  fi
-  echo
+    echo -e "${BOLD}Status File:${NC} $STATUS_FILE"
+    if [ -n "$AWS_PROFILE" ]; then
+        echo -e "${BOLD}AWS Profile:${NC} $AWS_PROFILE"
+    fi
+    echo
+    
+    # Check prerequisites
+    check_prerequisites
+    
+    # Validate status file
+    validate_status_file
+    
+    # Display resources to be removed
+    echo -e "${YELLOW}${BOLD}The following resources will be removed:${NC}"
+    
+    # CloudFront distributions
+    local distributions_json=$(jq -r '.distributions // {}' "$STATUS_FILE")
+    local distribution_id=$(jq -r '.distribution_id // ""' "$STATUS_FILE")
+    if [ "$(echo "$distributions_json" | jq 'length')" -gt 0 ] || [ -n "$distribution_id" ]; then
+        echo -e "  ${BOLD}CloudFront Distributions${NC}"
+    fi
+    
+    # OAC
+    local oac_id=$(jq -r '.oac_id // ""' "$STATUS_FILE")
+    if [ -n "$oac_id" ] && [ "$oac_id" != "null" ]; then
+        echo -e "  ${BOLD}CloudFront Origin Access Control${NC}"
+    fi
+    
+    # Certificate
+    local cert_arn=$(jq -r '.certificate_arn // ""' "$STATUS_FILE")
+    if [ -n "$cert_arn" ] && [ "$cert_arn" != "null" ]; then
+        echo -e "  ${BOLD}ACM Certificate${NC}"
+    fi
+    
+    # S3 buckets
+    local buckets_json=$(jq -r '.buckets // {}' "$STATUS_FILE")
+    local bucket_name=$(jq -r '.bucket_name // ""' "$STATUS_FILE")
+    if [ "$(echo "$buckets_json" | jq 'length')" -gt 0 ] || [ -n "$bucket_name" ]; then
+        echo -e "  ${BOLD}S3 Buckets${NC}"
+    fi
+    
+    # DNS records
+    local zones_json=$(jq -r '.zones // {}' "$STATUS_FILE")
+    local zone_id=$(jq -r '.zone_id // ""' "$STATUS_FILE")
+    if [ "$(echo "$zones_json" | jq 'length')" -gt 0 ] || [ -n "$zone_id" ]; then
+        echo -e "  ${BOLD}Route53 DNS Records${NC}"
+    fi
+    
+    echo
+    
+    # Confirm cleanup
+    if ! confirm_action "Are you sure you want to remove all these resources?"; then
+        log "INFO" "Cleanup cancelled"
+        exit 0
+    fi
+    
+    # Execute cleanup steps in reverse order
+    remove_cloudfront_distributions
+    remove_origin_access_controls
+    remove_certificate
+    remove_s3_buckets
+    remove_dns_records
+    
+    # Success message
+    log "SUCCESS" "Cleanup completed"
 }
 
-# Check if script is being sourced or executed
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-  main "$@"
-fi
+# Run the script
+main "$@"

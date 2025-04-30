@@ -43,7 +43,7 @@ routing through Route53.
 Deploy a static website with a single command:
 
 ```bash
-./deploy-static-site.sh --domain yourdomain.com [--profile aws-profile] [--region us-east-1] [--yes]
+./deploy.sh --domain yourdomain.com [--profile aws-profile] [--region us-east-1] [--yes]
 ```
 
 Required parameters:

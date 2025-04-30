@@ -1,875 +1,1065 @@
 #!/bin/bash
-
+# =============================================================================
 # AWS Static Site Deployment Script
-# This script automates the deployment of a static website using:
-# - S3 for storage
-# - CloudFront for CDN
+# 
+# This script automates the deployment of a static website on AWS using:
+# - S3 for static content hosting
+# - CloudFront for CDN and HTTPS
 # - ACM for SSL certificate
-# - Route53 for DNS
-
-set -e
+# - Route53 for DNS management
+#
+# Usage: ./deploy.sh --domain yourdomain.com [options]
+# Options:
+#   --domain DOMAIN     Domain name (required)
+#   --profile PROFILE   AWS CLI profile (optional)
+#   --region REGION     AWS region (default: us-east-1)
+#   --yes               Skip all confirmation prompts
+#   --status-file FILE  Custom status file path
+# =============================================================================
 
 # Color definitions
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 BLUE='\033[0;34m'
+MAGENTA='\033[0;35m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
 NC='\033[0m' # No Color
 
 # Default values
-AUTO_CONFIRM=false
-STATUS_FILE="deployment_status.json"
-SAMPLE_HTML="<!DOCTYPE html><html><head><title>Deployment Successful</title></head><body><h1>Hello, World!</h1><p>Your static site is successfully deployed.</p></body></html>"
+AWS_REGION="us-east-1"
+AWS_PROFILE=""
+DOMAIN=""
+STATUS_FILE=""
+AUTO_APPROVE=false
+TIMEOUT_RETRIES=5
+CERTIFICATE_WAIT_SECONDS=120
+CERTIFICATE_WAIT_INTERVAL=10
 
-# Function to display usage information
+# Function to display script usage
 usage() {
-  echo "Usage: $0 --domain <domain> [options]"
-  echo ""
-  echo "Required:"
-  echo "  --domain <domain>     Domain name for the static site (must be a Route53 hosted zone)"
-  echo ""
-  echo "Options:"
-  echo "  --profile <profile>   AWS CLI profile to use"
-  echo "  --region <region>     AWS region (default: us-east-1)"
-  echo "  -y, --yes             Skip all confirmation prompts"
-  echo "  --status-file <file>  File to track deployment status (default: deployment_status.json)"
-  echo "  --help                Display this help message"
-  exit 1
+    echo -e "${BOLD}Usage:${NC} $0 --domain yourdomain.com [options]"
+    echo -e "${BOLD}Options:${NC}"
+    echo "  --domain DOMAIN     Domain name (required)"
+    echo "  --profile PROFILE   AWS CLI profile (optional)"
+    echo "  --region REGION     AWS region (default: us-east-1)"
+    echo "  --yes               Skip all confirmation prompts"
+    echo "  --status-file FILE  Custom status file path"
+    exit 1
 }
 
-# Function to log messages with timestamp
+# Function to display messages with timestamp
 log() {
-  local level=$1
-  local message=$2
-  local timestamp=$(date "+%Y-%m-%d %H:%M:%S")
-  
-  case $level in
-    "INFO")
-      echo -e "${BLUE}[INFO]${NC} $timestamp - $message"
-      ;;
-    "SUCCESS")
-      echo -e "${GREEN}[SUCCESS]${NC} $timestamp - $message"
-      ;;
-    "WARN")
-      echo -e "${YELLOW}[WARNING]${NC} $timestamp - $message"
-      ;;
-    "ERROR")
-      echo -e "${RED}[ERROR]${NC} $timestamp - $message"
-      ;;
-    *)
-      echo "$timestamp - $message"
-      ;;
-  esac
+    local level=$1
+    local message=$2
+    local timestamp=$(date "+%Y-%m-%d %H:%M:%S")
+    
+    case $level in
+        "INFO") 
+            echo -e "${BLUE}[INFO]${NC} ${timestamp} - ${message}"
+            ;;
+        "SUCCESS") 
+            echo -e "${GREEN}[SUCCESS]${NC} ${timestamp} - ${message}"
+            ;;
+        "WARN") 
+            echo -e "${YELLOW}[WARNING]${NC} ${timestamp} - ${message}"
+            ;;
+        "ERROR") 
+            echo -e "${RED}[ERROR]${NC} ${timestamp} - ${message}"
+            ;;
+        "STEP") 
+            echo -e "\n${MAGENTA}[STEP]${NC} ${timestamp} - ${BOLD}${message}${NC}"
+            ;;
+    esac
 }
 
-# Function to update the status file
-update_status() {
-  local step=$1
-  local status=$2
-  local metadata=$3
-  
-  # Create the file with initial structure if it doesn't exist
-  if [ ! -f "$STATUS_FILE" ]; then
-    echo '{"steps":{}}' > "$STATUS_FILE"
-  fi
-  
-  # Update the status file with jq
-  if [ -z "$metadata" ]; then
-    jq --arg step "$step" --arg status "$status" '.steps[$step] = {"status": $status, "timestamp": "'$(date -u +"%Y-%m-%dT%H:%M:%SZ")'"}' "$STATUS_FILE" > "${STATUS_FILE}.tmp"
-  else
-    jq --arg step "$step" --arg status "$status" --argjson metadata "$metadata" '.steps[$step] = {"status": $status, "timestamp": "'$(date -u +"%Y-%m-%dT%H:%M:%SZ")'", "metadata": $metadata}' "$STATUS_FILE" > "${STATUS_FILE}.tmp"
-  fi
-  
-  mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
-  log "INFO" "Status updated: $step -> $status"
-}
-
-# Function to check status and determine if a step should be skipped
-check_status() {
-  local step=$1
-  
-  if [ ! -f "$STATUS_FILE" ]; then
-    return 1
-  fi
-  
-  local status=$(jq -r --arg step "$step" '.steps[$step].status // "NOT_STARTED"' "$STATUS_FILE")
-  
-  if [ "$status" == "COMPLETED" ]; then
-    log "INFO" "Step '$step' already completed. Skipping..."
-    return 0
-  else
-    return 1
-  fi
-}
-
-# Function to get metadata from the status file
-get_metadata() {
-  local step=$1
-  local key=$2
-  
-  if [ ! -f "$STATUS_FILE" ]; then
-    return 1
-  fi
-  
-  jq -r --arg step "$step" --arg key "$key" '.steps[$step].metadata[$key] // empty' "$STATUS_FILE"
-}
-
-# Function to confirm with the user
-confirm() {
-  local message=$1
-  
-  if [ "$AUTO_CONFIRM" = true ]; then
-    return 0
-  fi
-  
-  echo -e "${YELLOW}$message (Y/n)${NC}"
-  read -r answer
-  
-  if [ "$answer" = "n" ] || [ "$answer" = "N" ]; then
-    return 1
-  else
-    return 0
-  fi
-}
-
-# Function to check if a Route53 hosted zone exists for the domain
-check_hosted_zone() {
-  local domain=$1
-  local cmd="aws route53 list-hosted-zones-by-name --dns-name $domain. $AWS_PROFILE_ARG $AWS_REGION_ARG"
-  
-  log "INFO" "Checking if hosted zone exists for $domain..."
-  local result=$(eval "$cmd")
-  local zone_count=$(echo "$result" | jq -r --arg domain "$domain." '.HostedZones | map(select(.Name == $domain)) | length')
-  
-  if [ "$zone_count" -gt 0 ]; then
-    local zone_id=$(echo "$result" | jq -r --arg domain "$domain." '.HostedZones | map(select(.Name == $domain)) | .[0].Id' | sed 's|/hostedzone/||')
-    log "SUCCESS" "Found hosted zone for $domain (ID: $zone_id)"
-    echo "$zone_id"
-    return 0
-  else
-    log "ERROR" "No hosted zone found for $domain. Please create it first in Route53."
-    return 1
-  fi
-}
-
-# Function to create or check S3 bucket
-create_s3_bucket() {
-  local domain=$1
-  local bucket_name="$domain-static-site"
-  local step="create_s3_bucket"
-  
-  if check_status "$step"; then
-    bucket_name=$(get_metadata "$step" "bucket_name")
-    log "INFO" "Using existing bucket: $bucket_name"
-    echo "$bucket_name"
-    return 0
-  fi
-  
-  log "INFO" "Creating S3 bucket: $bucket_name..."
-  
-  if confirm "Create S3 bucket '$bucket_name'?"; then
-    # Check if bucket exists
-    if aws s3api head-bucket --bucket "$bucket_name" $AWS_PROFILE_ARG $AWS_REGION_ARG 2>/dev/null; then
-      log "INFO" "Bucket already exists: $bucket_name"
-    else
-      # Create the bucket
-      local cmd="aws s3api create-bucket --bucket $bucket_name $AWS_PROFILE_ARG"
-      
-      # If region is not us-east-1, we need to specify LocationConstraint
-      if [ "$AWS_REGION" != "us-east-1" ] && [ -n "$AWS_REGION" ]; then
-        cmd="$cmd --create-bucket-configuration LocationConstraint=$AWS_REGION"
-      fi
-      
-      eval "$cmd"
-      
-      if [ $? -ne 0 ]; then
-        log "ERROR" "Failed to create S3 bucket"
-        return 1
-      fi
+# Function to check for required commands
+check_prerequisites() {
+    log "STEP" "Checking prerequisites"
+    
+    local missing_tools=()
+    
+    for tool in aws jq curl host; do
+        if ! command -v $tool &> /dev/null; then
+            missing_tools+=($tool)
+        fi
+    done
+    
+    if [ ${#missing_tools[@]} -ne 0 ]; then
+        log "ERROR" "Missing required tools: ${missing_tools[*]}"
+        log "INFO" "Please install the required tools and try again."
+        exit 1
     fi
     
-    # Enable static website hosting
-    aws s3api put-bucket-website --bucket "$bucket_name" \
-      --website-configuration '{"IndexDocument":{"Suffix":"index.html"},"ErrorDocument":{"Key":"error.html"}}' \
-      $AWS_PROFILE_ARG $AWS_REGION_ARG
+    log "SUCCESS" "All required tools are installed"
+}
+
+# Function to check AWS CLI configuration
+check_aws_config() {
+    log "STEP" "Checking AWS CLI configuration"
     
-    # Block public access
-    aws s3api put-public-access-block --bucket "$bucket_name" \
-      --public-access-block-configuration "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true" \
-      $AWS_PROFILE_ARG $AWS_REGION_ARG
+    local aws_cmd="aws"
+    if [ -n "$AWS_PROFILE" ]; then
+        aws_cmd="$aws_cmd --profile $AWS_PROFILE"
+    fi
     
-    log "SUCCESS" "S3 bucket created and configured: $bucket_name"
+    if ! $aws_cmd sts get-caller-identity &> /dev/null; then
+        log "ERROR" "AWS CLI is not configured correctly"
+        log "INFO" "Please run 'aws configure' or check your credentials and try again."
+        exit 1
+    fi
     
-    # Update status
-    update_status "$step" "COMPLETED" "{\"bucket_name\": \"$bucket_name\"}"
+    local account_id=$($aws_cmd sts get-caller-identity --query "Account" --output text)
+    log "SUCCESS" "AWS CLI is configured correctly (Account ID: $account_id)"
     
-    echo "$bucket_name"
+    # Store account ID in status file
+    update_status "account_id" "$account_id"
+}
+
+# Function to initialize or load status file
+init_status_file() {
+    if [ -z "$STATUS_FILE" ]; then
+        STATUS_FILE=".deploy-status-${DOMAIN}.json"
+    fi
+    
+    if [ -f "$STATUS_FILE" ]; then
+        log "INFO" "Using existing status file: $STATUS_FILE"
+    else
+        log "INFO" "Creating new status file: $STATUS_FILE"
+        echo "{\"domain\": \"$DOMAIN\", \"created_at\": \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\"}" > "$STATUS_FILE"
+    fi
+}
+
+# Function to update status file with a key-value pair
+update_status() {
+    local key=$1
+    local value=$2
+    
+    if [ -f "$STATUS_FILE" ]; then
+        # Use temp file to avoid issues with some jq versions
+        local temp_file=$(mktemp)
+        jq -r --arg key "$key" --arg value "$value" '. + {($key): $value}' "$STATUS_FILE" > "$temp_file"
+        mv "$temp_file" "$STATUS_FILE"
+    else
+        log "ERROR" "Status file does not exist"
+        exit 1
+    fi
+}
+
+# Function to get value from status file
+get_status() {
+    local key=$1
+    local default_value=$2
+    
+    if [ -f "$STATUS_FILE" ]; then
+        local value=$(jq -r --arg key "$key" '.[$key] // ""' "$STATUS_FILE")
+        if [ -z "$value" ] || [ "$value" = "null" ]; then
+            echo "$default_value"
+        else
+            echo "$value"
+        fi
+    else
+        echo "$default_value"
+    fi
+}
+
+# Function to check if step is completed
+is_step_completed() {
+    local step=$1
+    local completed=$(get_status "${step}_completed" "false")
+    
+    if [ "$completed" = "true" ]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Function to mark step as completed
+mark_step_completed() {
+    local step=$1
+    update_status "${step}_completed" "true"
+    update_status "${step}_completed_at" "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+}
+
+# Function to confirm action with user
+confirm_action() {
+    local message=$1
+    
+    if [ "$AUTO_APPROVE" = true ]; then
+        return 0
+    fi
+    
+    echo -e "${YELLOW}${message} (y/n)${NC}"
+    read -r response
+    if [[ "$response" =~ ^([yY][eE][sS]|[yY])$ ]]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Function to check Route53 hosted zone
+check_hosted_zone() {
+    if is_step_completed "hosted_zone"; then
+        local zone_id=$(get_status "zone_id" "")
+        log "INFO" "Hosted zone already verified (Zone ID: $zone_id)"
+        return 0
+    fi
+    
+    log "STEP" "Checking Route53 hosted zone for $DOMAIN"
+    
+    local aws_cmd="aws"
+    if [ -n "$AWS_PROFILE" ]; then
+        aws_cmd="$aws_cmd --profile $AWS_PROFILE"
+    fi
+    
+    local zone_id=$($aws_cmd route53 list-hosted-zones --query "HostedZones[?Name=='$DOMAIN.' || Name=='$DOMAIN'].Id" --output text | sed 's/\/hostedzone\///')
+    
+    if [ -z "$zone_id" ]; then
+        log "ERROR" "No Route53 hosted zone found for $DOMAIN"
+        log "INFO" "Please create a hosted zone for $DOMAIN in Route53 and try again."
+        exit 1
+    fi
+    
+    log "SUCCESS" "Found Route53 hosted zone for $DOMAIN (Zone ID: $zone_id)"
+    update_status "zone_id" "$zone_id"
+    mark_step_completed "hosted_zone"
     return 0
-  else
-    log "ERROR" "S3 bucket creation cancelled by user"
-    return 1
-  fi
+}
+
+# Function to create S3 bucket
+create_s3_bucket() {
+    if is_step_completed "s3_bucket"; then
+        local bucket_name=$(get_status "bucket_name" "")
+        log "INFO" "S3 bucket already created (Bucket: $bucket_name)"
+        return 0
+    fi
+    
+    log "STEP" "Creating S3 bucket for $DOMAIN"
+    
+    local bucket_name="${DOMAIN}-static-site"
+    local aws_cmd="aws"
+    if [ -n "$AWS_PROFILE" ]; then
+        aws_cmd="$aws_cmd --profile $AWS_PROFILE"
+    fi
+    
+    # Check if bucket already exists
+    if $aws_cmd s3api head-bucket --bucket "$bucket_name" 2>/dev/null; then
+        log "INFO" "Bucket $bucket_name already exists"
+    else
+        log "INFO" "Creating bucket $bucket_name in $AWS_REGION"
+        
+        # Create bucket command varies based on region
+        if [ "$AWS_REGION" = "us-east-1" ]; then
+            $aws_cmd s3api create-bucket \
+                --bucket "$bucket_name" \
+                --region "$AWS_REGION"
+        else
+            $aws_cmd s3api create-bucket \
+                --bucket "$bucket_name" \
+                --region "$AWS_REGION" \
+                --create-bucket-configuration LocationConstraint="$AWS_REGION"
+        fi
+        
+        if [ $? -ne 0 ]; then
+            log "ERROR" "Failed to create S3 bucket"
+            exit 1
+        fi
+    fi
+    
+    # Configure website hosting
+    log "INFO" "Configuring website hosting for bucket $bucket_name"
+    $aws_cmd s3 website \
+        --bucket "$bucket_name" \
+        --index-document index.html \
+        --error-document error.html
+    
+    # Block public access (CloudFront will access via OAC)
+    log "INFO" "Blocking public access to bucket $bucket_name"
+    $aws_cmd s3api put-public-access-block \
+        --bucket "$bucket_name" \
+        --public-access-block-configuration "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true"
+    
+    log "SUCCESS" "S3 bucket created and configured successfully"
+    update_status "bucket_name" "$bucket_name"
+    mark_step_completed "s3_bucket"
+    return 0
 }
 
 # Function to create ACM certificate
-create_acm_certificate() {
-  local domain=$1
-  local step="create_acm_certificate"
-  
-  if check_status "$step"; then
-    cert_arn=$(get_metadata "$step" "certificate_arn")
-    log "INFO" "Using existing ACM certificate: $cert_arn"
-    echo "$cert_arn"
-    return 0
-  fi
-  
-  log "INFO" "Creating ACM certificate for $domain..."
-  
-  if confirm "Create new ACM certificate for '$domain'?"; then
-    # ACM certificates for CloudFront must be in us-east-1
-    local result=$(aws acm request-certificate \
-      --domain-name "$domain" \
-      --validation-method DNS \
-      --region us-east-1 \
-      $AWS_PROFILE_ARG)
-    
-    if [ $? -ne 0 ]; then
-      log "ERROR" "Failed to create ACM certificate"
-      return 1
+create_certificate() {
+    if is_step_completed "certificate"; then
+        local cert_arn=$(get_status "certificate_arn" "")
+        log "INFO" "Certificate already created (ARN: $cert_arn)"
+        return 0
     fi
     
-    local cert_arn=$(echo "$result" | jq -r '.CertificateArn')
-    log "SUCCESS" "ACM certificate request created: $cert_arn"
+    log "STEP" "Creating ACM certificate for $DOMAIN"
     
-    # Wait for certificate details to be available
-    log "INFO" "Waiting for certificate details..."
-    sleep 5
-    
-    # Get validation details
-    local cert_details=$(aws acm describe-certificate \
-      --certificate-arn "$cert_arn" \
-      --region us-east-1 \
-      $AWS_PROFILE_ARG)
-    
-    # Extract validation record details
-    local record_name=$(echo "$cert_details" | jq -r '.Certificate.DomainValidationOptions[0].ResourceRecord.Name')
-    local record_value=$(echo "$cert_details" | jq -r '.Certificate.DomainValidationOptions[0].ResourceRecord.Value')
-    local record_type=$(echo "$cert_details" | jq -r '.Certificate.DomainValidationOptions[0].ResourceRecord.Type')
-    
-    # Get the hosted zone ID
-    local zone_id=$(check_hosted_zone "$domain")
-    
-    # Create validation DNS record
-    log "INFO" "Creating DNS validation record..."
-    local change_batch="{
-      \"Changes\": [
-        {
-          \"Action\": \"UPSERT\",
-          \"ResourceRecordSet\": {
-            \"Name\": \"$record_name\",
-            \"Type\": \"$record_type\",
-            \"TTL\": 300,
-            \"ResourceRecords\": [
-              {
-                \"Value\": \"$record_value\"
-              }
-            ]
-          }
-        }
-      ]
-    }"
-    
-    aws route53 change-resource-record-sets \
-      --hosted-zone-id "$zone_id" \
-      --change-batch "$change_batch" \
-      $AWS_PROFILE_ARG $AWS_REGION_ARG
-    
-    log "INFO" "DNS validation record created. Waiting for certificate validation..."
-    
-    # Wait for validation to complete
-    aws acm wait certificate-validated \
-      --certificate-arn "$cert_arn" \
-      --region us-east-1 \
-      $AWS_PROFILE_ARG
-    
-    if [ $? -eq 0 ]; then
-      log "SUCCESS" "Certificate validation completed"
-      
-      # Update status
-      update_status "$step" "COMPLETED" "{\"certificate_arn\": \"$cert_arn\"}"
-      
-      echo "$cert_arn"
-      return 0
-    else
-      log "ERROR" "Certificate validation timed out. You may need to manually check the status later."
-      
-      # Still save the ARN for later
-      update_status "$step" "PENDING" "{\"certificate_arn\": \"$cert_arn\"}"
-      
-      echo "$cert_arn"
-      return 1
-    fi
-  else
-    log "ERROR" "ACM certificate creation cancelled by user"
-    return 1
-  fi
-}
-
-# Function to create CloudFront Origin Access Control (OAC)
-create_origin_access_control() {
-  local domain=$1
-  local step="create_origin_access_control"
-  
-  if check_status "$step"; then
-    oac_id=$(get_metadata "$step" "oac_id")
-    log "INFO" "Using existing Origin Access Control: $oac_id"
-    echo "$oac_id"
-    return 0
-  fi
-  
-  log "INFO" "Creating CloudFront Origin Access Control..."
-  
-  if confirm "Create Origin Access Control for S3 access?"; then
-    local oac_name="$domain-s3-oac"
-    local result=$(aws cloudfront create-origin-access-control \
-      --origin-access-control-config "{
-        \"Name\": \"$oac_name\",
-        \"Description\": \"OAC for $domain static site\",
-        \"SigningProtocol\": \"sigv4\",
-        \"SigningBehavior\": \"always\",
-        \"OriginAccessControlOriginType\": \"s3\"
-      }" \
-      $AWS_PROFILE_ARG $AWS_REGION_ARG)
-    
-    if [ $? -ne 0 ]; then
-      log "ERROR" "Failed to create Origin Access Control"
-      return 1
+    local aws_cmd="aws"
+    if [ -n "$AWS_PROFILE" ]; then
+        aws_cmd="$aws_cmd --profile $AWS_PROFILE"
     fi
     
-    local oac_id=$(echo "$result" | jq -r '.OriginAccessControl.Id')
-    log "SUCCESS" "Origin Access Control created: $oac_id"
+    # Certificate must be in us-east-1 for CloudFront
+    local cert_region="us-east-1"
     
-    # Update status
-    update_status "$step" "COMPLETED" "{\"oac_id\": \"$oac_id\"}"
+    # Request certificate
+    local cert_arn=$(get_status "certificate_arn" "")
+    if [ -z "$cert_arn" ]; then
+        log "INFO" "Requesting new certificate for $DOMAIN" 
+        cert_arn=$($aws_cmd acm request-certificate \
+            --domain-name "$DOMAIN" \
+            --validation-method DNS \
+            --region "$cert_region" \
+            --query "CertificateArn" \
+            --output text)
+        
+        if [ $? -ne 0 ] || [ -z "$cert_arn" ]; then
+            log "ERROR" "Failed to request certificate"
+            exit 1
+        fi
+        
+        log "SUCCESS" "Certificate requested successfully (ARN: $cert_arn)"
+        update_status "certificate_arn" "$cert_arn"
+    fi
     
-    echo "$oac_id"
-    return 0
-  else
-    log "ERROR" "Origin Access Control creation cancelled by user"
-    return 1
-  fi
-}
-
-# Function to update S3 bucket policy for CloudFront access
-update_bucket_policy() {
-  local bucket_name=$1
-  local oac_id=$2
-  local step="update_bucket_policy"
-  
-  if check_status "$step"; then
-    log "INFO" "Bucket policy already configured"
-    return 0
-  fi
-  
-  log "INFO" "Updating bucket policy to allow CloudFront access..."
-  
-  if confirm "Update bucket policy to allow CloudFront access?"; then
-    # Create bucket policy
-    local bucket_policy="{
-      \"Version\": \"2012-10-17\",
-      \"Statement\": [
-        {
-          \"Sid\": \"AllowCloudFrontServicePrincipal\",
-          \"Effect\": \"Allow\",
-          \"Principal\": {
-            \"Service\": \"cloudfront.amazonaws.com\"
-          },
-          \"Action\": \"s3:GetObject\",
-          \"Resource\": \"arn:aws:s3:::$bucket_name/*\",
-          \"Condition\": {
-            \"StringEquals\": {
-              \"AWS:SourceArn\": \"arn:aws:cloudfront::$(aws sts get-caller-identity $AWS_PROFILE_ARG $AWS_REGION_ARG | jq -r .Account):distribution/*\"
+    # Wait for DNS validation records
+    log "INFO" "Waiting for DNS validation records (this may take a minute)..."
+    local validation_records=""
+    local attempts=0
+    local max_attempts=12
+    
+    while [ $attempts -lt $max_attempts ]; do
+        validation_records=$($aws_cmd acm describe-certificate \
+            --certificate-arn "$cert_arn" \
+            --region "$cert_region" \
+            --query "Certificate.DomainValidationOptions[].ResourceRecord" \
+            --output json)
+        
+        if [ "$(echo "$validation_records" | jq 'length')" -gt 0 ]; then
+            break
+        fi
+        
+        attempts=$((attempts + 1))
+        log "INFO" "Waiting for validation records ($attempts/$max_attempts)..."
+        sleep $CERTIFICATE_WAIT_INTERVAL
+    done
+    
+    if [ "$(echo "$validation_records" | jq 'length')" -eq 0 ]; then
+        log "WARN" "Timed out waiting for validation records. Will continue with certificate ARN stored for next run."
+        return 0
+    fi
+    
+    # Create DNS validation records
+    log "INFO" "Creating DNS validation records in Route53"
+    local zone_id=$(get_status "zone_id" "")
+    
+    local change_batch=$(echo "$validation_records" | jq -c '{
+        Changes: [.[] | {
+            Action: "UPSERT",
+            ResourceRecordSet: {
+                Name: .Name,
+                Type: .Type,
+                TTL: 300,
+                ResourceRecords: [{Value: .Value}]
             }
-          }
-        }
-      ]
-    }"
+        }]
+    }')
     
-    aws s3api put-bucket-policy \
-      --bucket "$bucket_name" \
-      --policy "$bucket_policy" \
-      $AWS_PROFILE_ARG $AWS_REGION_ARG
+    $aws_cmd route53 change-resource-record-sets \
+        --hosted-zone-id "$zone_id" \
+        --change-batch "$change_batch"
     
     if [ $? -ne 0 ]; then
-      log "ERROR" "Failed to update bucket policy"
-      return 1
+        log "ERROR" "Failed to create DNS validation records"
+        exit 1
     fi
     
-    log "SUCCESS" "Bucket policy updated to allow CloudFront access"
+    # Wait for certificate validation
+    log "INFO" "Waiting for certificate validation (this may take 5-30 minutes)..."
+    if ! $aws_cmd acm wait certificate-validated \
+        --certificate-arn "$cert_arn" \
+        --region "$cert_region"; then
+        log "WARN" "Timed out waiting for certificate validation. The process is still ongoing."
+        log "INFO" "You can run this script again later to continue from this point."
+        return 0
+    fi
     
-    # Update status
-    update_status "$step" "COMPLETED" "{}"
-    
+    log "SUCCESS" "Certificate validated successfully"
+    mark_step_completed "certificate"
     return 0
-  else
-    log "ERROR" "Bucket policy update cancelled by user"
-    return 1
-  fi
+}
+
+# Function to create CloudFront OAC
+create_oac() {
+    if is_step_completed "oac"; then
+        local oac_id=$(get_status "oac_id" "")
+        log "INFO" "Origin Access Control already created (ID: $oac_id)"
+        return 0
+    fi
+    
+    log "STEP" "Creating CloudFront Origin Access Control"
+    
+    local aws_cmd="aws"
+    if [ -n "$AWS_PROFILE" ]; then
+        aws_cmd="$aws_cmd --profile $AWS_PROFILE"
+    fi
+    
+    # Create OAC
+    local oac_name="${DOMAIN}-oac"
+    local oac_config=$(cat <<EOF
+{
+    "Name": "$oac_name",
+    "Description": "OAC for $DOMAIN",
+    "SigningProtocol": "sigv4",
+    "SigningBehavior": "always",
+    "OriginAccessControlOriginType": "s3"
+}
+EOF
+)
+    
+    local oac_result=$($aws_cmd cloudfront create-origin-access-control \
+        --origin-access-control-config "$oac_config" \
+        --output json)
+    
+    if [ $? -ne 0 ]; then
+        log "ERROR" "Failed to create Origin Access Control"
+        exit 1
+    fi
+    
+    local oac_id=$(echo "$oac_result" | jq -r '.OriginAccessControl.Id')
+    
+    log "SUCCESS" "Origin Access Control created successfully (ID: $oac_id)"
+    update_status "oac_id" "$oac_id"
+    mark_step_completed "oac"
+    return 0
 }
 
 # Function to create CloudFront distribution
 create_cloudfront_distribution() {
-  local domain=$1
-  local bucket_name=$2
-  local cert_arn=$3
-  local oac_id=$4
-  local step="create_cloudfront_distribution"
-  
-  if check_status "$step"; then
-    distribution_id=$(get_metadata "$step" "distribution_id")
-    distribution_domain=$(get_metadata "$step" "distribution_domain")
-    log "INFO" "Using existing CloudFront distribution: $distribution_id ($distribution_domain)"
-    echo "$distribution_id $distribution_domain"
-    return 0
-  fi
-  
-  log "INFO" "Creating CloudFront distribution for $bucket_name..."
-  
-  if confirm "Create CloudFront distribution for '$domain'?"; then
-    # Create config file for distribution
-    local distribution_config="{
-      \"CallerReference\": \"$domain-$(date +%s)\",
-      \"Aliases\": {
-        \"Quantity\": 1,
-        \"Items\": [\"$domain\"]
-      },
-      \"DefaultRootObject\": \"index.html\",
-      \"Origins\": {
-        \"Quantity\": 1,
-        \"Items\": [
-          {
-            \"Id\": \"S3-$bucket_name\",
-            \"DomainName\": \"$bucket_name.s3.amazonaws.com\",
-            \"OriginPath\": \"\",
-            \"S3OriginConfig\": {
-              \"OriginAccessIdentity\": \"\"
-            },
-            \"OriginAccessControlId\": \"$oac_id\"
-          }
-        ]
-      },
-      \"DefaultCacheBehavior\": {
-        \"TargetOriginId\": \"S3-$bucket_name\",
-        \"ViewerProtocolPolicy\": \"redirect-to-https\",
-        \"AllowedMethods\": {
-          \"Quantity\": 2,
-          \"Items\": [\"GET\", \"HEAD\"],
-          \"CachedMethods\": {
-            \"Quantity\": 2,
-            \"Items\": [\"GET\", \"HEAD\"]
-          }
-        },
-        \"CachePolicyId\": \"658327ea-f89d-4fab-a63d-7e88639e58f6\",
-        \"Compress\": true
-      },
-      \"ViewerCertificate\": {
-        \"ACMCertificateArn\": \"$cert_arn\",
-        \"SSLSupportMethod\": \"sni-only\",
-        \"MinimumProtocolVersion\": \"TLSv1.2_2021\"
-      },
-      \"Enabled\": true,
-      \"HttpVersion\": \"http2and3\",
-      \"PriceClass\": \"PriceClass_100\",
-      \"Comment\": \"Distribution for $domain static site\"
-    }"
-    
-    local result=$(aws cloudfront create-distribution \
-      --distribution-config "$distribution_config" \
-      $AWS_PROFILE_ARG $AWS_REGION_ARG)
-    
-    if [ $? -ne 0 ]; then
-      log "ERROR" "Failed to create CloudFront distribution"
-      return 1
+    if is_step_completed "cloudfront"; then
+        local distribution_id=$(get_status "distribution_id" "")
+        local distribution_domain=$(get_status "distribution_domain" "")
+        log "INFO" "CloudFront distribution already created (ID: $distribution_id, Domain: $distribution_domain)"
+        return 0
     fi
     
-    local distribution_id=$(echo "$result" | jq -r '.Distribution.Id')
-    local distribution_domain=$(echo "$result" | jq -r '.Distribution.DomainName')
+    log "STEP" "Creating CloudFront distribution for $DOMAIN"
     
-    log "SUCCESS" "CloudFront distribution created: $distribution_id ($distribution_domain)"
+    # Check if certificate is validated
+    if ! is_step_completed "certificate"; then
+        log "WARN" "Certificate is not yet validated. Please run the script again later."
+        return 1
+    fi
     
-    # Update status
-    update_status "$step" "COMPLETED" "{\"distribution_id\": \"$distribution_id\", \"distribution_domain\": \"$distribution_domain\"}"
+    local aws_cmd="aws"
+    if [ -n "$AWS_PROFILE" ]; then
+        aws_cmd="$aws_cmd --profile $AWS_PROFILE"
+    fi
     
-    echo "$distribution_id $distribution_domain"
+    local bucket_name=$(get_status "bucket_name" "")
+    local cert_arn=$(get_status "certificate_arn" "")
+    local oac_id=$(get_status "oac_id" "")
+    
+    # Prepare distribution config
+    local dist_config_file=$(mktemp)
+    cat > "$dist_config_file" <<EOF
+{
+    "CallerReference": "${DOMAIN}-$(date +%s)",
+    "Aliases": {
+        "Quantity": 2,
+        "Items": [
+            "${DOMAIN}"
+        ]
+    },
+    "DefaultRootObject": "index.html",
+    "Origins": {
+        "Quantity": 1,
+        "Items": [
+            {
+                "Id": "S3-${bucket_name}",
+                "DomainName": "${bucket_name}.s3.${AWS_REGION}.amazonaws.com",
+                "OriginPath": "",
+                "CustomHeaders": {
+                    "Quantity": 0
+                },
+                "S3OriginConfig": {
+                    "OriginAccessIdentity": ""
+                },
+                "OriginAccessControlId": "${oac_id}"
+            }
+        ]
+    },
+    "OriginGroups": {
+        "Quantity": 0
+    },
+    "DefaultCacheBehavior": {
+        "TargetOriginId": "S3-${bucket_name}",
+        "ViewerProtocolPolicy": "redirect-to-https",
+        "AllowedMethods": {
+            "Quantity": 2,
+            "Items": [
+                "GET",
+                "HEAD"
+            ],
+            "CachedMethods": {
+                "Quantity": 2,
+                "Items": [
+                    "GET",
+                    "HEAD"
+                ]
+            }
+        },
+        "SmoothStreaming": false,
+        "Compress": true,
+        "LambdaFunctionAssociations": {
+            "Quantity": 0
+        },
+        "FieldLevelEncryptionId": "",
+        "CachePolicyId": "658327ea-f89d-4fab-a63d-7e88639e58f6",
+        "OriginRequestPolicyId": "88a5eaf4-2fd4-4709-b370-b4c650ea3fcf"
+    },
+    "CacheBehaviors": {
+        "Quantity": 0
+    },
+    "CustomErrorResponses": {
+        "Quantity": 1,
+        "Items": [
+            {
+                "ErrorCode": 404,
+                "ResponsePagePath": "/error.html",
+                "ResponseCode": "404",
+                "ErrorCachingMinTTL": 10
+            }
+        ]
+    },
+    "Comment": "Distribution for ${DOMAIN}",
+    "Logging": {
+        "Enabled": false,
+        "IncludeCookies": false,
+        "Bucket": "",
+        "Prefix": ""
+    },
+    "PriceClass": "PriceClass_100",
+    "Enabled": true,
+    "ViewerCertificate": {
+        "ACMCertificateArn": "${cert_arn}",
+        "SSLSupportMethod": "sni-only",
+        "MinimumProtocolVersion": "TLSv1.2_2021",
+        "Certificate": "${cert_arn}",
+        "CertificateSource": "acm"
+    },
+    "Restrictions": {
+        "GeoRestriction": {
+            "RestrictionType": "none",
+            "Quantity": 0
+        }
+    },
+    "WebACLId": "",
+    "HttpVersion": "http2",
+    "IsIPV6Enabled": true
+}
+EOF
+    
+    # Create distribution
+    log "INFO" "Creating CloudFront distribution (this may take a minute)..."
+    local dist_result=$($aws_cmd cloudfront create-distribution \
+        --distribution-config "file://${dist_config_file}" \
+        --output json)
+    
+    rm -f "$dist_config_file"
+    
+    if [ $? -ne 0 ]; then
+        log "ERROR" "Failed to create CloudFront distribution"
+        exit 1
+    fi
+    
+    local distribution_id=$(echo "$dist_result" | jq -r '.Distribution.Id')
+    local distribution_domain=$(echo "$dist_result" | jq -r '.Distribution.DomainName')
+    
+    log "SUCCESS" "CloudFront distribution created successfully"
+    log "INFO" "Distribution ID: $distribution_id"
+    log "INFO" "Distribution Domain: $distribution_domain"
+    
+    update_status "distribution_id" "$distribution_id"
+    update_status "distribution_domain" "$distribution_domain"
+    mark_step_completed "cloudfront"
+    
+    # Update S3 bucket policy
+    update_bucket_policy
+    
     return 0
-  else
-    log "ERROR" "CloudFront distribution creation cancelled by user"
-    return 1
-  fi
 }
 
-# Function to create Route53 DNS record
-create_route53_record() {
-  local domain=$1
-  local distribution_domain=$2
-  local step="create_route53_record"
-  
-  if check_status "$step"; then
-    log "INFO" "Route53 record already created"
-    return 0
-  fi
-  
-  log "INFO" "Creating Route53 record to point $domain to CloudFront..."
-  
-  if confirm "Create Route53 record for '$domain' pointing to CloudFront?"; then
-    # Get the hosted zone ID
-    local zone_id=$(check_hosted_zone "$domain")
+# Function to update S3 bucket policy
+update_bucket_policy() {
+    log "STEP" "Updating S3 bucket policy"
     
-    # Create A record alias to CloudFront
-    local change_batch="{
-      \"Changes\": [
-        {
-          \"Action\": \"UPSERT\",
-          \"ResourceRecordSet\": {
-            \"Name\": \"$domain\",
-            \"Type\": \"A\",
-            \"AliasTarget\": {
-              \"HostedZoneId\": \"Z2FDTNDATAQYW2\",
-              \"DNSName\": \"$distribution_domain\",
-              \"EvaluateTargetHealth\": false
-            }
-          }
-        }
-      ]
-    }"
-    
-    aws route53 change-resource-record-sets \
-      --hosted-zone-id "$zone_id" \
-      --change-batch "$change_batch" \
-      $AWS_PROFILE_ARG $AWS_REGION_ARG
-    
-    if [ $? -ne 0 ]; then
-      log "ERROR" "Failed to create Route53 record"
-      return 1
+    local aws_cmd="aws"
+    if [ -n "$AWS_PROFILE" ]; then
+        aws_cmd="$aws_cmd --profile $AWS_PROFILE"
     fi
     
-    log "SUCCESS" "Route53 record created for $domain -> $distribution_domain"
+    local bucket_name=$(get_status "bucket_name" "")
+    local account_id=$(get_status "account_id" "")
     
-    # Update status
-    update_status "$step" "COMPLETED" "{}"
+    # Create bucket policy
+    local policy_file=$(mktemp)
+    cat > "$policy_file" <<EOF
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "AllowCloudFrontServicePrincipal",
+            "Effect": "Allow",
+            "Principal": {
+                "Service": "cloudfront.amazonaws.com"
+            },
+            "Action": "s3:GetObject",
+            "Resource": "arn:aws:s3:::${bucket_name}/*",
+            "Condition": {
+                "StringEquals": {
+                    "AWS:SourceArn": "arn:aws:cloudfront::${account_id}:distribution/$(get_status "distribution_id" "")"
+                }
+            }
+        }
+    ]
+}
+EOF
     
+    # Apply policy
+    $aws_cmd s3api put-bucket-policy \
+        --bucket "$bucket_name" \
+        --policy "file://${policy_file}"
+    
+    rm -f "$policy_file"
+    
+    if [ $? -ne 0 ]; then
+        log "ERROR" "Failed to update bucket policy"
+        return 1
+    fi
+    
+    log "SUCCESS" "Bucket policy updated successfully"
     return 0
-  else
-    log "ERROR" "Route53 record creation cancelled by user"
-    return 1
-  fi
+}
+
+# Function to create Route53 DNS records
+create_dns_records() {
+    if is_step_completed "dns"; then
+        log "INFO" "DNS records already created"
+        return 0
+    fi
+    
+    log "STEP" "Creating Route53 DNS records for $DOMAIN"
+    
+    local aws_cmd="aws"
+    if [ -n "$AWS_PROFILE" ]; then
+        aws_cmd="$aws_cmd --profile $AWS_PROFILE"
+    fi
+    
+    local zone_id=$(get_status "zone_id" "")
+    local distribution_domain=$(get_status "distribution_domain" "")
+    
+    # Create A record aliases for domain and www subdomain
+    local change_batch=$(cat <<EOF
+{
+    "Changes": [
+        {
+            "Action": "UPSERT",
+            "ResourceRecordSet": {
+                "Name": "${DOMAIN}",
+                "Type": "A",
+                "AliasTarget": {
+                    "HostedZoneId": "Z2FDTNDATAQYW2",
+                    "DNSName": "${distribution_domain}",
+                    "EvaluateTargetHealth": false
+                }
+            }
+        }
+    ]
+}
+EOF
+)
+    
+    $aws_cmd route53 change-resource-record-sets \
+        --hosted-zone-id "$zone_id" \
+        --change-batch "$change_batch"
+    
+    if [ $? -ne 0 ]; then
+        log "ERROR" "Failed to create DNS records"
+        return 1
+    fi
+    
+    log "SUCCESS" "DNS records created successfully"
+    mark_step_completed "dns"
+    return 0
 }
 
 # Function to upload sample content
 upload_sample_content() {
-  local bucket_name=$1
-  local step="upload_sample_content"
-  
-  if check_status "$step"; then
-    log "INFO" "Sample content already uploaded"
-    return 0
-  fi
-  
-  log "INFO" "Uploading sample content to S3 bucket..."
-  
-  if confirm "Upload sample content to S3 bucket?"; then
-    # Create temporary files
-    local temp_dir=$(mktemp -d)
-    local index_file="$temp_dir/index.html"
-    local error_file="$temp_dir/error.html"
-    
-    echo "$SAMPLE_HTML" > "$index_file"
-    echo "<!DOCTYPE html><html><head><title>Error</title></head><body><h1>Error</h1><p>The requested page was not found.</p></body></html>" > "$error_file"
-    
-    # Upload files
-    aws s3 cp "$index_file" "s3://$bucket_name/index.html" --content-type "text/html" $AWS_PROFILE_ARG $AWS_REGION_ARG
-    aws s3 cp "$error_file" "s3://$bucket_name/error.html" --content-type "text/html" $AWS_PROFILE_ARG $AWS_REGION_ARG
-    
-    if [ $? -ne 0 ]; then
-      log "ERROR" "Failed to upload sample content"
-      rm -rf "$temp_dir"
-      return 1
+    if is_step_completed "content"; then
+        log "INFO" "Sample content already uploaded"
+        return 0
     fi
     
-    log "SUCCESS" "Sample content uploaded to S3 bucket"
+    log "STEP" "Uploading sample content to S3 bucket"
     
-    # Clean up
-    rm -rf "$temp_dir"
+    local aws_cmd="aws"
+    if [ -n "$AWS_PROFILE" ]; then
+        aws_cmd="$aws_cmd --profile $AWS_PROFILE"
+    fi
     
-    # Update status
-    update_status "$step" "COMPLETED" "{}"
+    local bucket_name=$(get_status "bucket_name" "")
     
+    # Create sample index.html
+    local index_file=$(mktemp)
+    cat > "$index_file" <<EOF
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Welcome to ${DOMAIN}</title>
+    <style>
+        body {
+            font-family: Helvetica, Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 40px 20px;
+            line-height: 1.6;
+            color: #333;
+        }
+        h1 {
+            color: #0066cc;
+        }
+        .success {
+            background-color: #cccccc;
+            color: #000000;
+            padding: 15px;
+            border-radius: 4px;
+            margin-bottom: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="success">
+        <h1>Hello, World!</h1>
+        <p>Your site is live and routing.</p>
+    </div>
+    <p>Deployed on: $(date)</p>
+</body>
+</html>
+EOF
+    
+    # Create sample error.html
+    local error_file=$(mktemp)
+    cat > "$error_file" <<EOF
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Page Not Found - ${DOMAIN}</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 40px 20px;
+            line-height: 1.6;
+            color: #333;
+            text-align: center;
+        }
+        h1 {
+            color: #dc3545;
+        }
+        .error {
+            background-color: #f8d7da;
+            color: #721c24;
+            padding: 15px;
+            border-radius: 4px;
+            margin-bottom: 20px;
+        }
+        a {
+            color: #0066cc;
+            text-decoration: none;
+        }
+        a:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <div class="error">
+        <h1>404 - Page Not Found</h1>
+        <p>The page you are looking for does not exist.</p>
+    </div>
+    <p><a href="/">Return to homepage</a></p>
+</body>
+</html>
+EOF
+    
+    # Upload files to S3
+    $aws_cmd s3 cp "$index_file" "s3://${bucket_name}/index.html" --content-type "text/html"
+    $aws_cmd s3 cp "$error_file" "s3://${bucket_name}/error.html" --content-type "text/html"
+    
+    rm -f "$index_file" "$error_file"
+    
+    if [ $? -ne 0 ]; then
+        log "ERROR" "Failed to upload sample content"
+        return 1
+    fi
+    
+    log "SUCCESS" "Sample content uploaded successfully"
+    mark_step_completed "content"
     return 0
-  else
-    log "ERROR" "Sample content upload cancelled by user"
-    return 1
-  fi
 }
 
 # Function to invalidate CloudFront cache
-invalidate_cloudfront_cache() {
-  local distribution_id=$1
-  local step="invalidate_cloudfront_cache"
-  
-  if check_status "$step"; then
-    log "INFO" "CloudFront cache already invalidated"
-    return 0
-  fi
-  
-  log "INFO" "Invalidating CloudFront cache..."
-  
-  if confirm "Invalidate CloudFront cache?"; then
-    local result=$(aws cloudfront create-invalidation \
-      --distribution-id "$distribution_id" \
-      --paths "/*" \
-      $AWS_PROFILE_ARG $AWS_REGION_ARG)
+invalidate_cache() {
+    log "STEP" "Invalidating CloudFront cache"
     
-    if [ $? -ne 0 ]; then
-      log "ERROR" "Failed to invalidate CloudFront cache"
-      return 1
+    local aws_cmd="aws"
+    if [ -n "$AWS_PROFILE" ]; then
+        aws_cmd="$aws_cmd --profile $AWS_PROFILE"
     fi
     
-    local invalidation_id=$(echo "$result" | jq -r '.Invalidation.Id')
-    log "SUCCESS" "CloudFront cache invalidation created: $invalidation_id"
+    local distribution_id=$(get_status "distribution_id" "")
     
-    # Update status
-    update_status "$step" "COMPLETED" "{\"invalidation_id\": \"$invalidation_id\"}"
+    # Create invalidation
+    local invalidation_result=$($aws_cmd cloudfront create-invalidation \
+        --distribution-id "$distribution_id" \
+        --paths "/*" \
+        --output json)
     
+    if [ $? -ne 0 ]; then
+        log "ERROR" "Failed to create invalidation"
+        return 1
+    fi
+    
+    local invalidation_id=$(echo "$invalidation_result" | jq -r '.Invalidation.Id')
+    
+    log "SUCCESS" "Cache invalidation created successfully (ID: $invalidation_id)"
+    update_status "invalidation_id" "$invalidation_id"
     return 0
-  else
-    log "ERROR" "CloudFront cache invalidation cancelled by user"
-    return 1
-  fi
 }
 
-# Function to wait for CloudFront distribution to deploy
+# Function to wait for CloudFront distribution deployment
 wait_for_distribution() {
-  local distribution_id=$1
-  local step="wait_for_distribution"
-  
-  if check_status "$step"; then
-    log "INFO" "Distribution deployment already completed"
-    return 0
-  fi
-  
-  log "INFO" "Waiting for CloudFront distribution to deploy..."
-  
-  if confirm "Wait for CloudFront distribution to deploy? This may take 5-10 minutes."; then
-    aws cloudfront wait distribution-deployed \
-      --id "$distribution_id" \
-      $AWS_PROFILE_ARG $AWS_REGION_ARG
+    log "STEP" "Waiting for CloudFront distribution deployment"
     
-    if [ $? -ne 0 ]; then
-      log "WARN" "CloudFront distribution deployment is taking longer than expected"
-      if confirm "Continue waiting?"; then
-        aws cloudfront wait distribution-deployed \
-          --id "$distribution_id" \
-          $AWS_PROFILE_ARG $AWS_REGION_ARG
-      fi
+    local aws_cmd="aws"
+    if [ -n "$AWS_PROFILE" ]; then
+        aws_cmd="$aws_cmd --profile $AWS_PROFILE"
     fi
     
-    log "SUCCESS" "CloudFront distribution deployed"
+    local distribution_id=$(get_status "distribution_id" "")
     
-    # Update status
-    update_status "$step" "COMPLETED" "{}"
+    log "INFO" "Waiting for distribution deployment (this may take 5-10 minutes)..."
+    if ! $aws_cmd cloudfront wait distribution-deployed \
+        --id "$distribution_id"; then
+        
+        log "WARN" "Timed out waiting for distribution deployment"
+        log "INFO" "Attempting additional checks..."
+        
+        # Additional checks
+        local attempts=0
+        local max_attempts=$TIMEOUT_RETRIES
+        
+        while [ $attempts -lt $max_attempts ]; do
+            attempts=$((attempts + 1))
+            log "INFO" "Additional check attempt ($attempts/$max_attempts)"
+            
+            local status=$($aws_cmd cloudfront get-distribution \
+                --id "$distribution_id" \
+                --query "Distribution.Status" \
+                --output text)
+            
+            if [ "$status" = "Deployed" ]; then
+                log "SUCCESS" "Distribution is now deployed"
+                return 0
+            fi
+            
+            log "INFO" "Current status: $status (waiting for 'Deployed')"
+            sleep 30
+        done
+        
+        log "WARN" "Distribution is still not fully deployed after additional checks"
+        log "INFO" "The deployment will continue in the background"
+        return 0
+    fi
     
+    log "SUCCESS" "Distribution is now deployed"
     return 0
-  else
-    log "WARN" "Skipping wait for CloudFront distribution deployment"
-    return 0
-  fi
 }
 
-# Function to verify the deployment
+# Function to verify deployment
 verify_deployment() {
-  local domain=$1
-  local step="verify_deployment"
-  
-  if check_status "$step"; then
-    log "INFO" "Deployment already verified"
-    return 0
-  fi
-  
-  log "INFO" "Verifying deployment..."
-  
-  if confirm "Verify deployment by checking site access?"; then
+    if is_step_completed "verification"; then
+        log "INFO" "Deployment already verified"
+        return 0
+    fi
+    
+    log "STEP" "Verifying deployment"
+    
     # Check DNS resolution
-    log "INFO" "Checking DNS resolution for $domain..."
-    if host "$domain" >/dev/null 2>&1; then
-      log "SUCCESS" "DNS resolves correctly for $domain"
+    log "INFO" "Checking DNS resolution for $DOMAIN..."
+    if ! host "$DOMAIN" &>/dev/null; then
+        log "WARN" "DNS not yet propagated for $DOMAIN"
     else
-      log "WARN" "DNS resolution for $domain may not be complete yet"
+        log "SUCCESS" "DNS resolution successful for $DOMAIN"
     fi
     
-    # Check HTTP access (follow redirects to HTTPS)
-    log "INFO" "Checking website access..."
-    if curl -s -o /dev/null -w "%{http_code}" -L "http://$domain/"; then
-      log "SUCCESS" "Website is accessible"
+    # Try to access the website
+    log "INFO" "Checking website accessibility..."
+    local http_code=$(curl -s -o /dev/null -w "%{http_code}" "https://$DOMAIN")
+    
+    if [ "$http_code" = "200" ]; then
+        log "SUCCESS" "Website is accessible (HTTP 200)"
+        mark_step_completed "verification"
     else
-      log "WARN" "Website access check failed. This may be due to DNS or CloudFront propagation delays."
+        log "WARN" "Website returned HTTP $http_code"
+        log "INFO" "DNS propagation may take more time"
     fi
     
-    # Update status
-    update_status "$step" "COMPLETED" "{}"
+    return 0
+}
+
+# Function to display deployment summary
+display_summary() {
+    log "STEP" "Deployment Summary"
+    echo -e "${CYAN}╔════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║                  ${BOLD}DEPLOYMENT SUMMARY${NC}${CYAN}                        ║${NC}"
+    echo -e "${CYAN}╚════════════════════════════════════════════════════════════╝${NC}"
+    echo
+    echo -e "${BOLD}Domain:${NC} $DOMAIN"
+    echo -e "${BOLD}S3 Bucket:${NC} $(get_status "bucket_name" "N/A")"
+    echo -e "${BOLD}CloudFront Distribution:${NC} $(get_status "distribution_id" "N/A")"
+    echo -e "${BOLD}Distribution Domain:${NC} $(get_status "distribution_domain" "N/A")"
+    echo -e "${BOLD}Status File:${NC} $STATUS_FILE"
+    echo
+    echo -e "${CYAN}╔════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║                      ${BOLD}NEXT STEPS${NC}${CYAN}                            ║${NC}"
+    echo -e "${CYAN}╚════════════════════════════════════════════════════════════╝${NC}"
+    echo
+    echo -e "1. ${BOLD}Access your website:${NC}"
+    echo -e "   https://$DOMAIN"
+    echo
+    echo -e "2. ${BOLD}Upload your content:${NC}"
+    echo -e "   aws s3 sync ./your-content-folder/ s3://$(get_status "bucket_name" "")"
+    echo
+    echo -e "3. ${BOLD}Invalidate cache after updates:${NC}"
+    echo -e "   aws cloudfront create-invalidation --distribution-id $(get_status "distribution_id" "") --paths \"/*\""
+    echo
     
-    return 0
-  else
-    log "WARN" "Skipping deployment verification"
-    return 0
-  fi
+    # Check if all steps are completed
+    local all_completed=true
+    for step in "hosted_zone" "s3_bucket" "certificate" "oac" "cloudfront" "dns" "content" "verification"; do
+        if ! is_step_completed "$step"; then
+            all_completed=false
+            break
+        fi
+    done
+    
+    if [ "$all_completed" = true ]; then
+        echo -e "${GREEN}${BOLD}Deployment completed successfully!${NC}"
+    else
+        echo -e "${YELLOW}${BOLD}Deployment is partially complete.${NC}"
+        echo -e "Run the script again to continue from where it left off."
+    fi
 }
 
 # Main execution
 main() {
-  # Parse command line arguments
-  while [[ $# -gt 0 ]]; do
-    key="$1"
+    # Process command line arguments
+    while [[ $# -gt 0 ]]; do
+        key="$1"
+        case $key in
+            --domain)
+                DOMAIN="$2"
+                shift
+                shift
+                ;;
+            --profile)
+                AWS_PROFILE="$2"
+                shift
+                shift
+                ;;
+            --region)
+                AWS_REGION="$2"
+                shift
+                shift
+                ;;
+            --yes)
+                AUTO_APPROVE=true
+                shift
+                ;;
+            --status-file)
+                STATUS_FILE="$2"
+                shift
+                shift
+                ;;
+            --help)
+                usage
+                ;;
+            *)
+                echo "Unknown option: $1"
+                usage
+                ;;
+        esac
+    done
     
-    case $key in
-      --domain)
-        DOMAIN="$2"
-        shift
-        shift
-        ;;
-      --profile)
-        AWS_PROFILE="$2"
-        AWS_PROFILE_ARG="--profile $AWS_PROFILE"
-        shift
-        shift
-        ;;
-      --region)
-        AWS_REGION="$2"
-        AWS_REGION_ARG="--region $AWS_REGION"
-        shift
-        shift
-        ;;
-      -y|--yes)
-        AUTO_CONFIRM=true
-        shift
-        ;;
-      --status-file)
-        STATUS_FILE="$2"
-        shift
-        shift
-        ;;
-      --help)
+    # Check for required parameters
+    if [ -z "$DOMAIN" ]; then
+        log "ERROR" "Domain name is required"
         usage
-        ;;
-      *)
-        echo "Unknown option: $1"
-        usage
-        ;;
-    esac
-  done
-  
-  # Validate required parameters
-  if [ -z "$DOMAIN" ]; then
-    log "ERROR" "Domain name is required"
-    usage
-  fi
-  
-  # Check for required commands
-  for cmd in aws jq host curl; do
-    if ! command -v $cmd &> /dev/null; then
-      log "ERROR" "Required command not found: $cmd"
-      exit 1
     fi
-  done
-  
-  log "INFO" "Starting deployment for domain: $DOMAIN"
-  log "INFO" "Status file: $STATUS_FILE"
-  
-  # Execute deployment steps
-  if ! check_hosted_zone "$DOMAIN"; then
-    exit 1
-  fi
-  
-  # Step 1: Create S3 bucket
-  BUCKET_NAME=$(create_s3_bucket "$DOMAIN")
-  if [ $? -ne 0 ]; then
-    exit 1
-  fi
-  
-  # Step 2: Create ACM certificate
-  CERT_ARN=$(create_acm_certificate "$DOMAIN")
-  if [ $? -ne 0 ]; then
-    log "WARN" "Certificate validation may be in progress. You can run this script again later."
-  fi
-  
-  # Step 3: Create CloudFront Origin Access Control
-  OAC_ID=$(create_origin_access_control "$DOMAIN")
-  if [ $? -ne 0 ]; then
-    exit 1
-  fi
-  
-  # Step 4: Update S3 bucket policy
-  if ! update_bucket_policy "$BUCKET_NAME" "$OAC_ID"; then
-    exit 1
-  fi
-  
-  # Step 5: Create CloudFront distribution
-  CF_RESULT=$(create_cloudfront_distribution "$DOMAIN" "$BUCKET_NAME" "$CERT_ARN" "$OAC_ID")
-  if [ $? -ne 0 ]; then
-    exit 1
-  fi
-  
-  # Extract distribution ID and domain
-  CF_DISTRIBUTION_ID=$(echo "$CF_RESULT" | cut -d ' ' -f 1)
-  CF_DISTRIBUTION_DOMAIN=$(echo "$CF_RESULT" | cut -d ' ' -f 2)
-  
-  # Step 6: Create Route53 record
-  if ! create_route53_record "$DOMAIN" "$CF_DISTRIBUTION_DOMAIN"; then
-    exit 1
-  fi
-  
-  # Step 7: Upload sample content
-  if ! upload_sample_content "$BUCKET_NAME"; then
-    exit 1
-  fi
-  
-  # Step 8: Invalidate CloudFront cache
-  if ! invalidate_cloudfront_cache "$CF_DISTRIBUTION_ID"; then
-    exit 1
-  fi
-  
-  # Step 9: Wait for distribution to deploy
-  if ! wait_for_distribution "$CF_DISTRIBUTION_ID"; then
-    log "WARN" "CloudFront distribution may still be deploying"
-  fi
-  
-  # Step 10: Verify deployment
-  if ! verify_deployment "$DOMAIN"; then
-    log "WARN" "Deployment verification skipped or failed"
-  fi
-  
-  log "SUCCESS" "Deployment completed successfully!"
-  log "INFO" "Website URL: https://$DOMAIN"
-  log "INFO" "CloudFront Distribution ID: $CF_DISTRIBUTION_ID"
-  log "INFO" "S3 Bucket: $BUCKET_NAME"
-  
-  # Print deployment summary
-  echo
-  echo -e "${GREEN}===== DEPLOYMENT SUMMARY =====${NC}"
-  echo "Domain: $DOMAIN"
-  echo "S3 Bucket: $BUCKET_NAME"
-  echo "CloudFront Distribution ID: $CF_DISTRIBUTION_ID"
-  echo "CloudFront Domain: $CF_DISTRIBUTION_DOMAIN"
-  echo "Status File: $STATUS_FILE"
-  echo
-  echo -e "${GREEN}To update your website, upload files to:${NC}"
-  echo "aws s3 cp your-file.html s3://$BUCKET_NAME/ $AWS_PROFILE_ARG $AWS_REGION_ARG"
-  echo
-  echo -e "${GREEN}To invalidate CloudFront cache:${NC}"
-  echo "aws cloudfront create-invalidation --distribution-id $CF_DISTRIBUTION_ID --paths '/*' $AWS_PROFILE_ARG $AWS_REGION_ARG"
-  echo
+    
+    # Welcome message
+    echo -e "${CYAN}╔════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${CYAN}║            ${BOLD}AWS STATIC SITE DEPLOYMENT SCRIPT${NC}${CYAN}               ║${NC}"
+    echo -e "${CYAN}╚════════════════════════════════════════════════════════════╝${NC}"
+    echo
+    echo -e "${BOLD}Domain:${NC} $DOMAIN"
+    echo -e "${BOLD}AWS Region:${NC} $AWS_REGION"
+    if [ -n "$AWS_PROFILE" ]; then
+        echo -e "${BOLD}AWS Profile:${NC} $AWS_PROFILE"
+    fi
+    echo
+    
+    # Initialize status file
+    init_status_file
+    
+    # Check prerequisites
+    check_prerequisites
+    
+    # Check AWS configuration
+    check_aws_config
+    
+    # Confirm deployment
+    if ! confirm_action "Proceed with deployment?"; then
+        log "INFO" "Deployment cancelled"
+        exit 0
+    fi
+    
+    # Execute deployment steps
+    check_hosted_zone
+    create_s3_bucket
+    create_certificate
+    create_oac
+    create_cloudfront_distribution
+    create_dns_records
+    upload_sample_content
+    invalidate_cache
+    wait_for_distribution
+    verify_deployment
+    
+    # Display summary
+    display_summary
 }
 
-# Check if script is being sourced or executed
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-  main "$@"
-fi
+# Run the script
+main "$@"
