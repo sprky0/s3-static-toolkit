@@ -10,6 +10,8 @@ It will be done soon, haven't had the time to test it properly yet.
 
 Getting closer
 
+@todo standardize output style of help messages and instructions etc
+
 
 
 
@@ -52,7 +54,7 @@ what a good idea I certainly didn't think of that midway through working on this
 
 ## Usage
 
-### AWS CLI basics
+### AWS CLI config basics
 
 - Run `src/login.sh` to sanity check your environment and credentials
 - Confirm the AWS account ID and credentials are appropriate for the target domains
@@ -62,7 +64,7 @@ what a good idea I certainly didn't think of that midway through working on this
 
 Deploy a static website with a single command:
 
-```bash
+```
 src/deploy-site.sh --domain [yourdomain.com] [options]
 Options:
   --domain DOMAIN              Domain name (required)
@@ -78,7 +80,7 @@ Options:
 
 Add non-authoritative domain redirects with the redirect companion script.
 
-```bash
+```
 Usage: ./deploy-redirect.sh --source-domains [domains,list,as,csv] --target-domain [domain]
 Options:
   --source-domains DOMAINS     Comma-separated list of source domains to redirect (required)
@@ -118,7 +120,7 @@ automatically skip completed steps and continue from where it left off.
 
 The toolkit includes a dedicated sync script that makes updating your website content easy and efficient:
 
-```bash
+```
 src/sync.sh --status-file [file] [options]
 
 Options:
@@ -160,7 +162,11 @@ The distribution ID is provided in the deployment summary and also stored in the
 
 ## License
 
-This software is provided under the MIT license, which is provided below:
+This software is provided under the MIT license, which is provided below.  As i'm sure
+many folks have had this same idea in parallel, I don't consider this effort groundbreaking
+or magical, however if you find this useful I wouldn't mind a shout-out in your implementation.
+
+---------------------------------------------------------------------------------------
 
 Copyright 2025 sprky0
 

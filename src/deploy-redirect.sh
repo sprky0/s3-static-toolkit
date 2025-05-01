@@ -56,12 +56,12 @@ log() {
 usage() {
     echo -e "${BOLD}Usage:${NC} $0 [options]"
     echo -e "${BOLD}Options:${NC}"
-    echo "  --source-domains <domains>   Comma-separated list of source domains to redirect (required)"
-    echo "  --target-domain <domain>     The destination domain for redirects (required)"
-    echo "  --profile <profile>          AWS CLI profile (optional)"
-    echo "  --region <region>            AWS region (default: us-east-1)"
+    echo "  --source-domains DOMAINS     Comma-separated list of source domains to redirect (required)"
+    echo "  --target-domain DOMAIN       The destination domain for redirects (required)"
+    echo "  --profile PROFILE            AWS CLI profile (optional)"
+    echo "  --region REGION              AWS region (default: us-east-1)"
+    echo "  --status-file FILE           Custom path for status tracking file"
     echo "  --yes                        Skip confirmation prompts"
-    echo "  --status-file <file>         Custom path for status tracking file"
     echo "  --help                       Display this help message"
     echo
     echo "Example:"
