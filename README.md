@@ -9,6 +9,10 @@ This needs a lot more testing on an empty account or super limited IAM credentia
 It will be done soon, haven't had the time to test it properly yet.
 
 
+
+
+
+
 # AWS Static Site Deployment Toolkit
 
 This repository contains an a "Static Site Deployment Toolkit," intended to help in deploying and managing static websites using
@@ -31,7 +35,7 @@ routing through Route53.
 
 - AWS CLI installed and configured with appropriate permissions
 - `jq` command-line JSON processor
-- An existing Route53 hosted zone for your domain
+- An existing Route53 hosted zone for any of the domains you wish to use
 - Bash shell environment
 - Clone this repository, export your creds, run login.sh
 
