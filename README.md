@@ -20,6 +20,11 @@ managing static websites using AWS infrastructure. It automates the process of s
 up an S3-backed static site with CloudFront CDN, SSL enforced and supplied via an
 auto-renewing cert via ACM, and DNS routing through Route53.
 
+Should these scripts possibly generate Cloudformation, Terraform, or some another IAC type
+configuration format, rather than using the AWS CLI / HTTP API manually?  Wouldn't that
+provide better support going forward without being locked into a funky custom toolchain?  Well
+what a good idea I certainly didn't think of that midway through working on this.  Maybe v2 😘
+
 
 ### Features
 
