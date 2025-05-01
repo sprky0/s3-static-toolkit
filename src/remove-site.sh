@@ -4,13 +4,9 @@
 # 
 # This script removes all AWS resources created by the deployment scripts
 # based on the JSON status file.
-#
-# Usage: ./cleanup.sh --status-file status.json [options]
-# Options:
-#   --status-file FILE     Path to the status JSON file (required)
-#   --profile PROFILE      AWS CLI profile (optional)
-#   --yes                  Skip all confirmation prompts
 # =============================================================================
+
+set -e
 
 # Color definitions
 RED='\033[0;31m'

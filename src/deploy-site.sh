@@ -2,20 +2,11 @@
 # =============================================================================
 # AWS Static Site Deployment Script
 # 
-# This script automates the deployment of a static website on AWS using:
-# - S3 for static content hosting
-# - CloudFront for CDN and HTTPS
-# - ACM for SSL certificate
-# - Route53 for DNS management
-#
-# Usage: ./deploy.sh --domain yourdomain.com [options]
-# Options:
-#   --domain DOMAIN     Domain name (required)
-#   --profile PROFILE   AWS CLI profile (optional)
-#   --region REGION     AWS region (default: us-east-1)
-#   --yes               Skip all confirmation prompts
-#   --status-file FILE  Custom status file path
+# This script automates the deployment of a static website on AWS, with a
+# single target domain using AWS services (S3, CloudFront, ACM, and Route53).
 # =============================================================================
+
+set -e
 
 # Color definitions
 RED='\033[0;31m'

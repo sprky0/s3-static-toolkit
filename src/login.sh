@@ -1,4 +1,11 @@
 #!/bin/bash
+# =============================================================================
+# AWS CLI login helper script
+#
+# This script confirms that the AWS credentials are set in the environment 
+# and that the AWS CLI is configured to use them.
+# =============================================================================
+
 
 # Check if required environment variables are set
 if [ -z "$AWS_ACCESS_KEY_ID" ] || [ -z "$AWS_SECRET_ACCESS_KEY" ]; then

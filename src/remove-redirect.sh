@@ -1,7 +1,10 @@
 #!/bin/bash
+# =============================================================================
 # AWS Multiple Domain Redirect Cleanup Script
-# This script reverses the changes made by the redirect.sh script by removing
-# all AWS resources created for domain redirection (CloudFront, ACM, S3, Route53).
+# 
+# This script removes all AWS resources created by the deployment scripts
+# based on the JSON status file.
+# =============================================================================
 
 set -e
 
@@ -15,12 +18,13 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 BLUE='\033[0;34m'
+BOLD='\033[1m'
 NC='\033[0m' # No Color
 
 # Display usage information
 usage() {
-    echo "Usage: $0 [options]"
-    echo "Options:"
+    echo "${BOLD}Usage:${NC} $0 [options]"
+    echo "${BOLD}Options:${NC}"
     echo "  --status-file <file>         Path to status file from the original deployment (required)"
     echo "  --profile <profile>          AWS CLI profile (optional)"
     echo "  --yes                        Skip confirmation prompts"

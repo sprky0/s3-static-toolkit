@@ -1,7 +1,10 @@
 #!/bin/bash
-
+# =============================================================================
 # AWS Static Site Sync Script
-# This script synchronizes a local directory with the S3 bucket and invalidates the CloudFront cache
+#
+# This script synchronizes a local directory with the S3 bucket and 
+# invalidates the CloudFront cache
+# =============================================================================
 
 set -e
 

@@ -1,7 +1,10 @@
 #!/bin/bash
+# =============================================================================
 # AWS Multiple Domain Redirect Script
+#
 # This script automates the setup of AWS infrastructure to redirect multiple source domains
 # to a single target domain using AWS services (S3, CloudFront, ACM, and Route53).
+# =============================================================================
 
 set -e
 
@@ -16,12 +19,13 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 BLUE='\033[0;34m'
+BOLD='\033[1m'
 NC='\033[0m' # No Color
 
 # Display usage information
 usage() {
-    echo "Usage: $0 [options]"
-    echo "Options:"
+    echo "${BOLD}Usage:${NC} $0 [options]"
+    echo "${BOLD}Options:${NC}"
     echo "  --source-domains <domains>   Comma-separated list of source domains to redirect (required)"
     echo "  --target-domain <domain>     The destination domain for redirects (required)"
     echo "  --profile <profile>          AWS CLI profile (optional)"
