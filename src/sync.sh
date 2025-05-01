@@ -43,7 +43,6 @@ log() {
     esac
 }
 
-
 # Default values
 AUTO_CONFIRM=false
 STATUS_FILE="deployment_status.json"
@@ -89,7 +88,7 @@ confirm() {
   fi
 }
 
-# Function to get metadata from the status file
+# Function to get metadata from the status file - MODIFIED to match deploy-site.sh JSON format
 get_metadata() {
   local step=$1
   local key=$2
@@ -99,7 +98,33 @@ get_metadata() {
     return 1
   fi
   
-  local value=$(jq -r --arg step "$step" --arg key "$key" '.steps[$step].metadata[$key] // empty' "$STATUS_FILE")
+  # First try to get the key directly as stored by deploy-site.sh
+  local value=""
+  
+  case $step in
+    "create_s3_bucket")
+      if [ "$key" = "bucket_name" ]; then
+        value=$(jq -r '.bucket_name // empty' "$STATUS_FILE")
+      fi
+      ;;
+    "create_cloudfront_distribution")
+      if [ "$key" = "distribution_id" ]; then
+        value=$(jq -r '.distribution_id // empty' "$STATUS_FILE")
+      elif [ "$key" = "distribution_domain" ]; then
+        value=$(jq -r '.distribution_domain // empty' "$STATUS_FILE")
+      fi
+      ;;
+    *)
+      # For other cases, try a generic approach
+      value=$(jq -r --arg key "${step}_${key}" '.[$key] // empty' "$STATUS_FILE")
+      ;;
+  esac
+  
+  if [ -z "$value" ] || [ "$value" = "null" ]; then
+    log "DEBUG" "Value not found for $step.$key, checking alternate format..."
+    # Try the original format as a fallback
+    value=$(jq -r --arg step "$step" --arg key "$key" '.steps[$step].metadata[$key] // empty' "$STATUS_FILE")
+  fi
   
   if [ -z "$value" ] || [ "$value" = "null" ]; then
     return 1
@@ -402,15 +427,23 @@ main() {
   # Get S3 bucket name from status file
   BUCKET_NAME=$(get_metadata "create_s3_bucket" "bucket_name")
   if [ -z "$BUCKET_NAME" ]; then
-    log "ERROR" "Failed to retrieve S3 bucket name from status file"
-    exit 1
+    # Fallback method: try to get directly from root
+    BUCKET_NAME=$(jq -r '.bucket_name // empty' "$STATUS_FILE")
+    if [ -z "$BUCKET_NAME" ]; then
+      log "ERROR" "Failed to retrieve S3 bucket name from status file"
+      exit 1
+    fi
   fi
   
   # Get CloudFront distribution ID from status file
   CF_DISTRIBUTION_ID=$(get_metadata "create_cloudfront_distribution" "distribution_id")
   if [ -z "$CF_DISTRIBUTION_ID" ]; then
-    log "ERROR" "Failed to retrieve CloudFront distribution ID from status file"
-    exit 1
+    # Fallback method: try to get directly from root
+    CF_DISTRIBUTION_ID=$(jq -r '.distribution_id // empty' "$STATUS_FILE")
+    if [ -z "$CF_DISTRIBUTION_ID" ]; then
+      log "ERROR" "Failed to retrieve CloudFront distribution ID from status file"
+      exit 1
+    fi
   fi
   
   # Extract domain from status file if available
