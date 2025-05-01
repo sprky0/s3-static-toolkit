@@ -15,6 +15,35 @@ YELLOW='\033[0;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
+# Function to log messages with timestamp
+log() {
+    local level=$1
+    local message=$2
+    local timestamp=$(date "+%Y-%m-%d %H:%M:%S")
+    
+    case $level in
+        "INFO") 
+            echo -e "${BLUE}[INFO]${NC} ${timestamp} - ${message}"
+            ;;
+        "SUCCESS") 
+            echo -e "${GREEN}[SUCCESS]${NC} ${timestamp} - ${message}"
+            ;;
+        "WARN") 
+            echo -e "${YELLOW}[WARNING]${NC} ${timestamp} - ${message}"
+            ;;
+        "ERROR") 
+            echo -e "${RED}[ERROR]${NC} ${timestamp} - ${message}"
+            ;;
+        "STEP") 
+            echo -e "\n${MAGENTA}[STEP]${NC} ${timestamp} - ${BOLD}${message}${NC}"
+            ;;
+        "DEBUG")
+            echo -e "${CYAN}[DEBUG]${NC} ${timestamp} - ${message}"
+            ;;
+    esac
+}
+
+
 # Default values
 AUTO_CONFIRM=false
 STATUS_FILE="deployment_status.json"
@@ -40,31 +69,6 @@ usage() {
   echo "  -y, --yes                Skip all confirmation prompts"
   echo "  --help                   Display this help message"
   exit 1
-}
-
-# Function to log messages with timestamp
-log() {
-  local level=$1
-  local message=$2
-  local timestamp=$(date "+%Y-%m-%d %H:%M:%S")
-  
-  case $level in
-    "INFO")
-      echo -e "${BLUE}[INFO]${NC} $timestamp - $message"
-      ;;
-    "SUCCESS")
-      echo -e "${GREEN}[SUCCESS]${NC} $timestamp - $message"
-      ;;
-    "WARN")
-      echo -e "${YELLOW}[WARNING]${NC} $timestamp - $message"
-      ;;
-    "ERROR")
-      echo -e "${RED}[ERROR]${NC} $timestamp - $message"
-      ;;
-    *)
-      echo "$timestamp - $message"
-      ;;
-  esac
 }
 
 # Function to confirm with the user

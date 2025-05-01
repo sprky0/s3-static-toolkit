@@ -18,22 +18,7 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m' # No Color
 
-# Default values
-AWS_PROFILE=""
-STATUS_FILE=""
-AUTO_APPROVE=false
-
-# Function to display script usage
-usage() {
-    echo -e "${BOLD}Usage:${NC} $0 --status-file status.json [options]"
-    echo -e "${BOLD}Options:${NC}"
-    echo "  --status-file FILE     Path to the status JSON file (required)"
-    echo "  --profile PROFILE      AWS CLI profile (optional)"
-    echo "  --yes                  Skip all confirmation prompts"
-    exit 1
-}
-
-# Function to display messages with timestamp
+# Function to log messages with timestamp
 log() {
     local level=$1
     local message=$2
@@ -55,8 +40,28 @@ log() {
         "STEP") 
             echo -e "\n${MAGENTA}[STEP]${NC} ${timestamp} - ${BOLD}${message}${NC}"
             ;;
+        "DEBUG")
+            echo -e "${CYAN}[DEBUG]${NC} ${timestamp} - ${message}"
+            ;;
     esac
 }
+
+
+# Default values
+AWS_PROFILE=""
+STATUS_FILE=""
+AUTO_APPROVE=false
+
+# Function to display script usage
+usage() {
+    echo -e "${BOLD}Usage:${NC} $0 --status-file status.json [options]"
+    echo -e "${BOLD}Options:${NC}"
+    echo "  --status-file FILE     Path to the status JSON file (required)"
+    echo "  --profile PROFILE      AWS CLI profile (optional)"
+    echo "  --yes                  Skip all confirmation prompts"
+    exit 1
+}
+
 
 # Function to confirm action with user
 confirm_action() {

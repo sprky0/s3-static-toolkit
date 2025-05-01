@@ -18,6 +18,35 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m' # No Color
 
+# Function to log messages with timestamp
+log() {
+    local level=$1
+    local message=$2
+    local timestamp=$(date "+%Y-%m-%d %H:%M:%S")
+    
+    case $level in
+        "INFO") 
+            echo -e "${BLUE}[INFO]${NC} ${timestamp} - ${message}"
+            ;;
+        "SUCCESS") 
+            echo -e "${GREEN}[SUCCESS]${NC} ${timestamp} - ${message}"
+            ;;
+        "WARN") 
+            echo -e "${YELLOW}[WARNING]${NC} ${timestamp} - ${message}"
+            ;;
+        "ERROR") 
+            echo -e "${RED}[ERROR]${NC} ${timestamp} - ${message}"
+            ;;
+        "STEP") 
+            echo -e "\n${MAGENTA}[STEP]${NC} ${timestamp} - ${BOLD}${message}${NC}"
+            ;;
+        "DEBUG")
+            echo -e "${CYAN}[DEBUG]${NC} ${timestamp} - ${message}"
+            ;;
+    esac
+}
+
+
 # Default values
 AWS_REGION="us-east-1"
 AWS_PROFILE=""
@@ -40,30 +69,6 @@ usage() {
     exit 1
 }
 
-# Function to display messages with timestamp
-log() {
-    local level=$1
-    local message=$2
-    local timestamp=$(date "+%Y-%m-%d %H:%M:%S")
-    
-    case $level in
-        "INFO") 
-            echo -e "${BLUE}[INFO]${NC} ${timestamp} - ${message}"
-            ;;
-        "SUCCESS") 
-            echo -e "${GREEN}[SUCCESS]${NC} ${timestamp} - ${message}"
-            ;;
-        "WARN") 
-            echo -e "${YELLOW}[WARNING]${NC} ${timestamp} - ${message}"
-            ;;
-        "ERROR") 
-            echo -e "${RED}[ERROR]${NC} ${timestamp} - ${message}"
-            ;;
-        "STEP") 
-            echo -e "\n${MAGENTA}[STEP]${NC} ${timestamp} - ${BOLD}${message}${NC}"
-            ;;
-    esac
-}
 
 # Function to check for required commands
 check_prerequisites() {

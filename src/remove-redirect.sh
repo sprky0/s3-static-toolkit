@@ -21,6 +21,35 @@ BLUE='\033[0;34m'
 BOLD='\033[1m'
 NC='\033[0m' # No Color
 
+# Function to log messages with timestamp
+log() {
+    local level=$1
+    local message=$2
+    local timestamp=$(date "+%Y-%m-%d %H:%M:%S")
+    
+    case $level in
+        "INFO") 
+            echo -e "${BLUE}[INFO]${NC} ${timestamp} - ${message}"
+            ;;
+        "SUCCESS") 
+            echo -e "${GREEN}[SUCCESS]${NC} ${timestamp} - ${message}"
+            ;;
+        "WARN") 
+            echo -e "${YELLOW}[WARNING]${NC} ${timestamp} - ${message}"
+            ;;
+        "ERROR") 
+            echo -e "${RED}[ERROR]${NC} ${timestamp} - ${message}"
+            ;;
+        "STEP") 
+            echo -e "\n${MAGENTA}[STEP]${NC} ${timestamp} - ${BOLD}${message}${NC}"
+            ;;
+        "DEBUG")
+            echo -e "${CYAN}[DEBUG]${NC} ${timestamp} - ${message}"
+            ;;
+    esac
+}
+
+
 # Display usage information
 usage() {
     echo "${BOLD}Usage:${NC} $0 [options]"
@@ -33,23 +62,6 @@ usage() {
     echo "Example:"
     echo "  $0 --status-file ~/.aws-redirect-status.json"
     exit 1
-}
-
-# Log formatted messages
-log() {
-    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    local log_level=$1
-    local message=$2
-    local color=$NC
-    
-    case $log_level in
-        "INFO") color=$GREEN ;;
-        "WARN") color=$YELLOW ;;
-        "ERROR") color=$RED ;;
-        "DEBUG") color=$BLUE ;;
-    esac
-    
-    echo -e "${color}[$timestamp] [$log_level] $message${NC}"
 }
 
 # Check if required tools are installed
