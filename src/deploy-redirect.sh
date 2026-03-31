@@ -1,7 +1,11 @@
 #!/bin/bash
+# =============================================================================
 # AWS Multiple Domain Redirect Script
-# This script automates the setup of AWS infrastructure to redirect multiple source domains
-# to a single target domain using AWS services (S3, CloudFront, ACM, and Route53).
+#
+# This script automates the setup of AWS infrastructure to redirect multiple 
+# source domains to a single target domain using AWS services (S3, CloudFront,
+# ACM, and Route53).
+# =============================================================================
 
 set -e
 
@@ -16,19 +20,49 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 BLUE='\033[0;34m'
+BOLD='\033[1m'
 NC='\033[0m' # No Color
+
+# Function to log messages with timestamp
+log() {
+    local level=$1
+    local message=$2
+    local timestamp=$(date "+%Y-%m-%d %H:%M:%S")
+    
+    case $level in
+        "INFO") 
+            echo -e "${BLUE}[INFO]${NC} ${timestamp} - ${message}"
+            ;;
+        "SUCCESS") 
+            echo -e "${GREEN}[SUCCESS]${NC} ${timestamp} - ${message}"
+            ;;
+        "WARN") 
+            echo -e "${YELLOW}[WARNING]${NC} ${timestamp} - ${message}"
+            ;;
+        "ERROR") 
+            echo -e "${RED}[ERROR]${NC} ${timestamp} - ${message}"
+            ;;
+        "STEP") 
+            echo -e "\n${MAGENTA}[STEP]${NC} ${timestamp} - ${BOLD}${message}${NC}"
+            ;;
+        "DEBUG")
+            echo -e "${CYAN}[DEBUG]${NC} ${timestamp} - ${message}"
+            ;;
+    esac
+}
+
 
 # Display usage information
 usage() {
     local exit_code="${1:-1}"
-    echo "Usage: $0 [options]"
-    echo "Options:"
-    echo "  --source-domains <domains>   Comma-separated list of source domains to redirect (required)"
-    echo "  --target-domain <domain>     The destination domain for redirects (required)"
-    echo "  --profile <profile>          AWS CLI profile (optional)"
-    echo "  --region <region>            AWS region (default: us-east-1)"
+    echo -e "${BOLD}Usage:${NC} $0 [options]"
+    echo -e "${BOLD}Options:${NC}"
+    echo "  --source-domains DOMAINS     Comma-separated list of source domains to redirect (required)"
+    echo "  --target-domain DOMAIN       The destination domain for redirects (required)"
+    echo "  --profile PROFILE            AWS CLI profile (optional)"
+    echo "  --region REGION              AWS region (default: us-east-1)"
+    echo "  --status-file FILE           Custom path for status tracking file"
     echo "  --yes                        Skip confirmation prompts"
-    echo "  --status-file <file>         Custom path for status tracking file"
     echo "  --help                       Display this help message"
     echo
     echo "Example:"
@@ -36,22 +70,6 @@ usage() {
     exit "$exit_code"
 }
 
-# Log formatted messages
-log() {
-    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    local log_level=$1
-    local message=$2
-    local color=$NC
-    
-    case $log_level in
-        "INFO") color=$GREEN ;;
-        "WARN") color=$YELLOW ;;
-        "ERROR") color=$RED ;;
-        "DEBUG") color=$BLUE ;;
-    esac
-    
-    echo -e "${color}[$timestamp] [$log_level] $message${NC}"
-}
 
 # Check if required tools are installed
 check_prerequisites() {
@@ -240,63 +258,6 @@ parse_domains() {
     log "INFO" "Target domain: $TARGET_DOMAIN"
 }
 
-# # Check Route53 hosted zones for all domains
-# check_hosted_zones() {
-#     if is_step_completed "check_hosted_zones"; then
-#         log "INFO" "Hosted zones already checked. Skipping..."
-#         return 0
-#     fi
-    
-#     log "INFO" "Checking Route53 hosted zones..."
-    
-#     local aws_cmd="aws"
-#     if [ -n "$PROFILE" ]; then
-#         aws_cmd="aws --profile $PROFILE"
-#     fi
-    
-#     # Check target domain
-#     local target_zone_id=$($aws_cmd route53 list-hosted-zones-by-name --dns-name "$TARGET_DOMAIN." --max-items 1 --query "HostedZones[?Name=='$TARGET_DOMAIN.'].Id" --output text | cut -d'/' -f3)
-    
-#     if [ -z "$target_zone_id" ]; then
-#         log "ERROR" "No Route53 hosted zone found for target domain: $TARGET_DOMAIN"
-#         log "ERROR" "Please create a hosted zone for this domain before continuing."
-#         exit 1
-#     fi
-    
-#     update_status "target_zone_id" "$target_zone_id"
-#     log "INFO" "Found hosted zone for target domain: $target_zone_id"
-    
-#     # Check source domains
-#     local missing_zones=()
-#     local domains_json="["
-    
-#     for domain in "${UNIQUE_DOMAINS[@]}"; do
-#         local zone_id=$($aws_cmd route53 list-hosted-zones-by-name --dns-name "$domain." --max-items 1 --query "HostedZones[?Name=='$domain.'].Id" --output text | cut -d'/' -f3)
-        
-#         if [ -z "$zone_id" ]; then
-#             missing_zones+=("$domain")
-#         else
-#             if [ $((${#domains_json}-1)) -gt 1 ]; then
-#                 domains_json+=","
-#             fi
-#             domains_json+="{\"domain\":\"$domain\",\"zone_id\":\"$zone_id\"}"
-#         fi
-#     done
-    
-#     domains_json+="]"
-#     update_status_array "domain_zones" "$domains_json"
-    
-#     if [ ${#missing_zones[@]} -gt 0 ]; then
-#         log "ERROR" "No Route53 hosted zones found for these domains: ${missing_zones[*]}"
-#         log "ERROR" "Please create hosted zones for these domains before continuing."
-#         exit 1
-#     fi
-    
-#     log "INFO" "All domains have Route53 hosted zones."
-#     mark_step_completed "check_hosted_zones"
-# }
-
-
 # Check Route53 hosted zones for all domains
 check_hosted_zones() {
     if is_step_completed "check_hosted_zones"; then
@@ -366,7 +327,6 @@ check_hosted_zones() {
     log "INFO" "All domains have corresponding Route53 hosted zones."
     mark_step_completed "check_hosted_zones"
 }
-
 
 # Create S3 bucket for redirection
 create_s3_bucket() {

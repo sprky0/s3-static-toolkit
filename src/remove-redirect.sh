@@ -1,7 +1,10 @@
 #!/bin/bash
+# =============================================================================
 # AWS Multiple Domain Redirect Cleanup Script
-# This script reverses the changes made by the redirect.sh script by removing
-# all AWS resources created for domain redirection (CloudFront, ACM, S3, Route53).
+# 
+# This script removes all AWS resources created by the deployment scripts
+# based on the JSON status file.
+# =============================================================================
 
 set -e
 
@@ -15,13 +18,43 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 BLUE='\033[0;34m'
+BOLD='\033[1m'
 NC='\033[0m' # No Color
+
+# Function to log messages with timestamp
+log() {
+    local level=$1
+    local message=$2
+    local timestamp=$(date "+%Y-%m-%d %H:%M:%S")
+    
+    case $level in
+        "INFO") 
+            echo -e "${BLUE}[INFO]${NC} ${timestamp} - ${message}"
+            ;;
+        "SUCCESS") 
+            echo -e "${GREEN}[SUCCESS]${NC} ${timestamp} - ${message}"
+            ;;
+        "WARN") 
+            echo -e "${YELLOW}[WARNING]${NC} ${timestamp} - ${message}"
+            ;;
+        "ERROR") 
+            echo -e "${RED}[ERROR]${NC} ${timestamp} - ${message}"
+            ;;
+        "STEP") 
+            echo -e "\n${MAGENTA}[STEP]${NC} ${timestamp} - ${BOLD}${message}${NC}"
+            ;;
+        "DEBUG")
+            echo -e "${CYAN}[DEBUG]${NC} ${timestamp} - ${message}"
+            ;;
+    esac
+}
+
 
 # Display usage information
 usage() {
     local exit_code="${1:-1}"
-    echo "Usage: $0 [options]"
-    echo "Options:"
+    echo "${BOLD}Usage:${NC} $0 [options]"
+    echo "${BOLD}Options:${NC}"
     echo "  --status-file <file>         Path to status file from the original deployment (required)"
     echo "  --profile <profile>          AWS CLI profile (optional)"
     echo "  --yes                        Skip confirmation prompts"
@@ -30,23 +63,6 @@ usage() {
     echo "Example:"
     echo "  $0 --status-file ~/.aws-redirect-status.json"
     exit "$exit_code"
-}
-
-# Log formatted messages
-log() {
-    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    local log_level=$1
-    local message=$2
-    local color=$NC
-    
-    case $log_level in
-        "INFO") color=$GREEN ;;
-        "WARN") color=$YELLOW ;;
-        "ERROR") color=$RED ;;
-        "DEBUG") color=$BLUE ;;
-    esac
-    
-    echo -e "${color}[$timestamp] [$log_level] $message${NC}"
 }
 
 # Check if required tools are installed

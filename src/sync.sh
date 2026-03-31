@@ -1,7 +1,10 @@
 #!/bin/bash
-
+# =============================================================================
 # AWS Static Site Sync Script
-# This script synchronizes a local directory with the S3 bucket and invalidates the CloudFront cache
+#
+# This script synchronizes a local directory with the S3 bucket and 
+# invalidates the CloudFront cache
+# =============================================================================
 
 set -e
 
@@ -11,6 +14,34 @@ GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
+
+# Function to log messages with timestamp
+log() {
+    local level=$1
+    local message=$2
+    local timestamp=$(date "+%Y-%m-%d %H:%M:%S")
+    
+    case $level in
+        "INFO") 
+            echo -e "${BLUE}[INFO]${NC} ${timestamp} - ${message}"
+            ;;
+        "SUCCESS") 
+            echo -e "${GREEN}[SUCCESS]${NC} ${timestamp} - ${message}"
+            ;;
+        "WARN") 
+            echo -e "${YELLOW}[WARNING]${NC} ${timestamp} - ${message}"
+            ;;
+        "ERROR") 
+            echo -e "${RED}[ERROR]${NC} ${timestamp} - ${message}"
+            ;;
+        "STEP") 
+            echo -e "\n${MAGENTA}[STEP]${NC} ${timestamp} - ${BOLD}${message}${NC}"
+            ;;
+        "DEBUG")
+            echo -e "${CYAN}[DEBUG]${NC} ${timestamp} - ${message}"
+            ;;
+    esac
+}
 
 # Default values
 AUTO_CONFIRM=false
@@ -42,31 +73,6 @@ usage() {
   exit "$exit_code"
 }
 
-# Function to log messages with timestamp
-log() {
-  local level=$1
-  local message=$2
-  local timestamp=$(date "+%Y-%m-%d %H:%M:%S")
-  
-  case $level in
-    "INFO")
-      echo -e "${BLUE}[INFO]${NC} $timestamp - $message"
-      ;;
-    "SUCCESS")
-      echo -e "${GREEN}[SUCCESS]${NC} $timestamp - $message"
-      ;;
-    "WARN")
-      echo -e "${YELLOW}[WARNING]${NC} $timestamp - $message"
-      ;;
-    "ERROR")
-      echo -e "${RED}[ERROR]${NC} $timestamp - $message"
-      ;;
-    *)
-      echo "$timestamp - $message"
-      ;;
-  esac
-}
-
 # Function to confirm with the user
 confirm() {
   local message=$1
@@ -85,7 +91,7 @@ confirm() {
   fi
 }
 
-# Function to get metadata from the status file
+# Function to get metadata from the status file - MODIFIED to match deploy-site.sh JSON format
 get_metadata() {
   local step=$1
   local key=$2
@@ -95,7 +101,33 @@ get_metadata() {
     return 1
   fi
   
-  local value=$(jq -r --arg step "$step" --arg key "$key" '.steps[$step].metadata[$key] // .[$key] // empty' "$STATUS_FILE")
+  # First try to get the key directly as stored by deploy-site.sh
+  local value=""
+  
+  case $step in
+    "create_s3_bucket")
+      if [ "$key" = "bucket_name" ]; then
+        value=$(jq -r '.bucket_name // empty' "$STATUS_FILE")
+      fi
+      ;;
+    "create_cloudfront_distribution")
+      if [ "$key" = "distribution_id" ]; then
+        value=$(jq -r '.distribution_id // empty' "$STATUS_FILE")
+      elif [ "$key" = "distribution_domain" ]; then
+        value=$(jq -r '.distribution_domain // empty' "$STATUS_FILE")
+      fi
+      ;;
+    *)
+      # For other cases, try a generic approach
+      value=$(jq -r --arg key "${step}_${key}" '.[$key] // empty' "$STATUS_FILE")
+      ;;
+  esac
+  
+  if [ -z "$value" ] || [ "$value" = "null" ]; then
+    log "DEBUG" "Value not found for $step.$key, checking alternate format..."
+    # Try the original format as a fallback
+    value=$(jq -r --arg step "$step" --arg key "$key" '.steps[$step].metadata[$key] // empty' "$STATUS_FILE")
+  fi
   
   if [ -z "$value" ] || [ "$value" = "null" ]; then
     return 1
@@ -411,15 +443,23 @@ main() {
   # Get S3 bucket name from status file
   BUCKET_NAME=$(get_metadata "create_s3_bucket" "bucket_name")
   if [ -z "$BUCKET_NAME" ]; then
-    log "ERROR" "Failed to retrieve S3 bucket name from status file"
-    exit 1
+    # Fallback method: try to get directly from root
+    BUCKET_NAME=$(jq -r '.bucket_name // empty' "$STATUS_FILE")
+    if [ -z "$BUCKET_NAME" ]; then
+      log "ERROR" "Failed to retrieve S3 bucket name from status file"
+      exit 1
+    fi
   fi
   
   # Get CloudFront distribution ID from status file
   CF_DISTRIBUTION_ID=$(get_metadata "create_cloudfront_distribution" "distribution_id")
   if [ -z "$CF_DISTRIBUTION_ID" ]; then
-    log "ERROR" "Failed to retrieve CloudFront distribution ID from status file"
-    exit 1
+    # Fallback method: try to get directly from root
+    CF_DISTRIBUTION_ID=$(jq -r '.distribution_id // empty' "$STATUS_FILE")
+    if [ -z "$CF_DISTRIBUTION_ID" ]; then
+      log "ERROR" "Failed to retrieve CloudFront distribution ID from status file"
+      exit 1
+    fi
   fi
   
   # Extract domain from status file if available

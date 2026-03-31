@@ -2,20 +2,11 @@
 # =============================================================================
 # AWS Static Site Deployment Script
 # 
-# This script automates the deployment of a static website on AWS using:
-# - S3 for static content hosting
-# - CloudFront for CDN and HTTPS
-# - ACM for SSL certificate
-# - Route53 for DNS management
-#
-# Usage: ./deploy.sh --domain yourdomain.com [options]
-# Options:
-#   --domain DOMAIN     Domain name (required)
-#   --profile PROFILE   AWS CLI profile (optional)
-#   --region REGION     AWS region (default: us-east-1)
-#   --yes               Skip all confirmation prompts
-#   --status-file FILE  Custom status file path
+# This script automates the deployment of a static website on AWS, with a
+# single target domain using AWS services (S3, CloudFront, ACM, and Route53).
 # =============================================================================
+
+set -e
 
 # Color definitions
 RED='\033[0;31m'
@@ -26,6 +17,35 @@ MAGENTA='\033[0;35m'
 CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m' # No Color
+
+# Function to log messages with timestamp
+log() {
+    local level=$1
+    local message=$2
+    local timestamp=$(date "+%Y-%m-%d %H:%M:%S")
+    
+    case $level in
+        "INFO") 
+            echo -e "${BLUE}[INFO]${NC} ${timestamp} - ${message}"
+            ;;
+        "SUCCESS") 
+            echo -e "${GREEN}[SUCCESS]${NC} ${timestamp} - ${message}"
+            ;;
+        "WARN") 
+            echo -e "${YELLOW}[WARNING]${NC} ${timestamp} - ${message}"
+            ;;
+        "ERROR") 
+            echo -e "${RED}[ERROR]${NC} ${timestamp} - ${message}"
+            ;;
+        "STEP") 
+            echo -e "\n${MAGENTA}[STEP]${NC} ${timestamp} - ${BOLD}${message}${NC}"
+            ;;
+        "DEBUG")
+            echo -e "${CYAN}[DEBUG]${NC} ${timestamp} - ${message}"
+            ;;
+    esac
+}
+
 
 # Default values
 AWS_REGION="us-east-1"
@@ -51,30 +71,6 @@ usage() {
     exit "$exit_code"
 }
 
-# Function to display messages with timestamp
-log() {
-    local level=$1
-    local message=$2
-    local timestamp=$(date "+%Y-%m-%d %H:%M:%S")
-    
-    case $level in
-        "INFO") 
-            echo -e "${BLUE}[INFO]${NC} ${timestamp} - ${message}"
-            ;;
-        "SUCCESS") 
-            echo -e "${GREEN}[SUCCESS]${NC} ${timestamp} - ${message}"
-            ;;
-        "WARN") 
-            echo -e "${YELLOW}[WARNING]${NC} ${timestamp} - ${message}"
-            ;;
-        "ERROR") 
-            echo -e "${RED}[ERROR]${NC} ${timestamp} - ${message}"
-            ;;
-        "STEP") 
-            echo -e "\n${MAGENTA}[STEP]${NC} ${timestamp} - ${BOLD}${message}${NC}"
-            ;;
-    esac
-}
 
 # Function to check for required commands
 check_prerequisites() {
@@ -273,11 +269,22 @@ create_s3_bucket() {
     
     # Configure website hosting
     log "INFO" "Configuring website hosting for bucket $bucket_name"
-    $aws_cmd s3 website \
+    # $aws_cmd s3 website \
+    #     --bucket "$bucket_name" \
+    #     --index-document index.html \
+    #     --error-document error.html
+    # or like this maybe? how is this
+    $aws_cmd s3api put-bucket-website \
         --bucket "$bucket_name" \
-        --index-document index.html \
-        --error-document error.html
-    
+        --website-configuration '{
+            "IndexDocument": {
+                "Suffix": "index.html"
+            },
+            "ErrorDocument": {
+                "Key": "error.html"
+            }
+        }'
+
     # Block public access (CloudFront will access via OAC)
     log "INFO" "Blocking public access to bucket $bucket_name"
     $aws_cmd s3api put-public-access-block \
@@ -395,12 +402,64 @@ create_certificate() {
     return 0
 }
 
+# # Function to create CloudFront OAC
+# create_oac() {
+#     if is_step_completed "oac"; then
+#         local oac_id=$(get_status "oac_id" "")
+#         log "INFO" "Origin Access Control already created (ID: $oac_id)"
+#         return 0
+#     fi
+    
+#     log "STEP" "Creating CloudFront Origin Access Control"
+    
+#     local aws_cmd="aws"
+#     if [ -n "$AWS_PROFILE" ]; then
+#         aws_cmd="$aws_cmd --profile $AWS_PROFILE"
+#     fi
+    
+#     # Create OAC
+#     local oac_name="${DOMAIN}-oac"
+#     local oac_config=$(cat <<EOF
+# {
+#     "Name": "$oac_name",
+#     "Description": "OAC for $DOMAIN",
+#     "SigningProtocol": "sigv4",
+#     "SigningBehavior": "always",
+#     "OriginAccessControlOriginType": "s3"
+# }
+# EOF
+# )
+    
+#     local oac_result=$($aws_cmd cloudfront create-origin-access-control \
+#         --origin-access-control-config "$oac_config" \
+#         --output json)
+    
+#     if [ $? -ne 0 ]; then
+#         log "ERROR" "Failed to create Origin Access Control"
+#         exit 1
+#     fi
+    
+#     local oac_id=$(echo "$oac_result" | jq -r '.OriginAccessControl.Id')
+    
+#     log "SUCCESS" "Origin Access Control created successfully (ID: $oac_id)"
+#     update_status "oac_id" "$oac_id"
+#     mark_step_completed "oac"
+#     return 0
+# }
+
 # Function to create CloudFront OAC
 create_oac() {
     if is_step_completed "oac"; then
         local oac_id=$(get_status "oac_id" "")
-        log "INFO" "Origin Access Control already created (ID: $oac_id)"
-        return 0
+        # Check if the OAC ID is empty despite being marked as completed
+        if [ -z "$oac_id" ]; then
+            log "WARN" "OAC marked as completed but ID is empty, will attempt to retrieve"
+            # Reset the completion status
+            update_status "oac_completed" "false"
+        else
+            log "INFO" "Origin Access Control already created (ID: $oac_id)"
+            return 0
+        fi
     fi
     
     log "STEP" "Creating CloudFront Origin Access Control"
@@ -412,6 +471,27 @@ create_oac() {
     
     # Create OAC
     local oac_name="${DOMAIN}-oac"
+    
+    # First, check if the OAC already exists by listing all OACs
+    log "INFO" "Checking if OAC already exists"
+    local existing_oacs=$($aws_cmd cloudfront list-origin-access-controls --output json)
+    
+    if [ $? -ne 0 ]; then
+        log "ERROR" "Failed to list existing Origin Access Controls"
+        return 1
+    fi
+    
+    # Try to find the OAC with the matching name
+    local existing_oac_id=$(echo "$existing_oacs" | jq -r --arg name "$oac_name" '.OriginAccessControlList.Items[] | select(.Name == $name) | .Id' 2>/dev/null)
+    
+    if [ -n "$existing_oac_id" ]; then
+        log "INFO" "Found existing OAC with name $oac_name (ID: $existing_oac_id)"
+        update_status "oac_id" "$existing_oac_id"
+        mark_step_completed "oac"
+        return 0
+    fi
+    
+    # If not found, create a new OAC
     local oac_config=$(cat <<EOF
 {
     "Name": "$oac_name",
@@ -427,12 +507,32 @@ EOF
         --origin-access-control-config "$oac_config" \
         --output json)
     
-    if [ $? -ne 0 ]; then
-        log "ERROR" "Failed to create Origin Access Control"
-        exit 1
+    local create_status=$?
+    
+    # If creation fails but it might be because it already exists, try to retrieve it again
+    if [ $create_status -ne 0 ]; then
+        log "WARN" "Failed to create OAC, checking if it exists despite the error"
+        local retry_oacs=$($aws_cmd cloudfront list-origin-access-controls --output json)
+        local retry_oac_id=$(echo "$retry_oacs" | jq -r --arg name "$oac_name" '.OriginAccessControlList.Items[] | select(.Name == $name) | .Id' 2>/dev/null)
+        
+        if [ -n "$retry_oac_id" ]; then
+            log "INFO" "Found existing OAC with name $oac_name (ID: $retry_oac_id)"
+            update_status "oac_id" "$retry_oac_id"
+            mark_step_completed "oac"
+            return 0
+        fi
+        
+        log "ERROR" "Failed to create Origin Access Control and could not find existing one"
+        return 1
     fi
     
+    # Successfully created new OAC
     local oac_id=$(echo "$oac_result" | jq -r '.OriginAccessControl.Id')
+    
+    if [ -z "$oac_id" ]; then
+        log "ERROR" "Failed to extract OAC ID from result"
+        return 1
+    fi
     
     log "SUCCESS" "Origin Access Control created successfully (ID: $oac_id)"
     update_status "oac_id" "$oac_id"
@@ -440,13 +540,179 @@ EOF
     return 0
 }
 
+
+
+# # Function to create CloudFront distribution
+# create_cloudfront_distribution() {
+#     if is_step_completed "cloudfront"; then
+#         local distribution_id=$(get_status "distribution_id" "")
+#         local distribution_domain=$(get_status "distribution_domain" "")
+#         log "INFO" "CloudFront distribution already created (ID: $distribution_id, Domain: $distribution_domain)"
+#         return 0
+#     fi
+    
+#     log "STEP" "Creating CloudFront distribution for $DOMAIN"
+    
+#     # Check if certificate is validated
+#     if ! is_step_completed "certificate"; then
+#         log "WARN" "Certificate is not yet validated. Please run the script again later."
+#         return 1
+#     fi
+    
+#     local aws_cmd="aws"
+#     if [ -n "$AWS_PROFILE" ]; then
+#         aws_cmd="$aws_cmd --profile $AWS_PROFILE"
+#     fi
+    
+#     local bucket_name=$(get_status "bucket_name" "")
+#     local cert_arn=$(get_status "certificate_arn" "")
+#     local oac_id=$(get_status "oac_id" "")
+    
+#     # Prepare distribution config
+#     local dist_config_file=$(mktemp)
+#     cat > "$dist_config_file" <<EOF
+# {
+#     "CallerReference": "${DOMAIN}-$(date +%s)",
+#     "Aliases": {
+#         "Quantity": 2,
+#         "Items": [
+#             "${DOMAIN}"
+#         ]
+#     },
+#     "DefaultRootObject": "index.html",
+#     "Origins": {
+#         "Quantity": 1,
+#         "Items": [
+#             {
+#                 "Id": "S3-${bucket_name}",
+#                 "DomainName": "${bucket_name}.s3.${AWS_REGION}.amazonaws.com",
+#                 "OriginPath": "",
+#                 "CustomHeaders": {
+#                     "Quantity": 0
+#                 },
+#                 "S3OriginConfig": {
+#                     "OriginAccessIdentity": ""
+#                 },
+#                 "OriginAccessControlId": "${oac_id}"
+#             }
+#         ]
+#     },
+#     "OriginGroups": {
+#         "Quantity": 0
+#     },
+#     "DefaultCacheBehavior": {
+#         "TargetOriginId": "S3-${bucket_name}",
+#         "ViewerProtocolPolicy": "redirect-to-https",
+#         "AllowedMethods": {
+#             "Quantity": 2,
+#             "Items": [
+#                 "GET",
+#                 "HEAD"
+#             ],
+#             "CachedMethods": {
+#                 "Quantity": 2,
+#                 "Items": [
+#                     "GET",
+#                     "HEAD"
+#                 ]
+#             }
+#         },
+#         "SmoothStreaming": false,
+#         "Compress": true,
+#         "LambdaFunctionAssociations": {
+#             "Quantity": 0
+#         },
+#         "FieldLevelEncryptionId": "",
+#         "CachePolicyId": "658327ea-f89d-4fab-a63d-7e88639e58f6",
+#         "OriginRequestPolicyId": "88a5eaf4-2fd4-4709-b370-b4c650ea3fcf"
+#     },
+#     "CacheBehaviors": {
+#         "Quantity": 0
+#     },
+#     "CustomErrorResponses": {
+#         "Quantity": 1,
+#         "Items": [
+#             {
+#                 "ErrorCode": 404,
+#                 "ResponsePagePath": "/error.html",
+#                 "ResponseCode": "404",
+#                 "ErrorCachingMinTTL": 10
+#             }
+#         ]
+#     },
+#     "Comment": "Distribution for ${DOMAIN}",
+#     "Logging": {
+#         "Enabled": false,
+#         "IncludeCookies": false,
+#         "Bucket": "",
+#         "Prefix": ""
+#     },
+#     "PriceClass": "PriceClass_100",
+#     "Enabled": true,
+#     "ViewerCertificate": {
+#         "ACMCertificateArn": "${cert_arn}",
+#         "SSLSupportMethod": "sni-only",
+#         "MinimumProtocolVersion": "TLSv1.2_2021",
+#         "Certificate": "${cert_arn}",
+#         "CertificateSource": "acm"
+#     },
+#     "Restrictions": {
+#         "GeoRestriction": {
+#             "RestrictionType": "none",
+#             "Quantity": 0
+#         }
+#     },
+#     "WebACLId": "",
+#     "HttpVersion": "http2",
+#     "IsIPV6Enabled": true
+# }
+# EOF
+    
+#     # Create distribution
+#     log "INFO" "Creating CloudFront distribution (this may take a minute)..."
+#     local dist_result=$($aws_cmd cloudfront create-distribution \
+#         --distribution-config "file://${dist_config_file}" \
+#         --output json)
+    
+#     rm -f "$dist_config_file"
+    
+#     if [ $? -ne 0 ]; then
+#         log "ERROR" "Failed to create CloudFront distribution"
+#         exit 1
+#     fi
+    
+#     local distribution_id=$(echo "$dist_result" | jq -r '.Distribution.Id')
+#     local distribution_domain=$(echo "$dist_result" | jq -r '.Distribution.DomainName')
+    
+#     log "SUCCESS" "CloudFront distribution created successfully"
+#     log "INFO" "Distribution ID: $distribution_id"
+#     log "INFO" "Distribution Domain: $distribution_domain"
+    
+#     update_status "distribution_id" "$distribution_id"
+#     update_status "distribution_domain" "$distribution_domain"
+#     mark_step_completed "cloudfront"
+    
+#     # Update S3 bucket policy
+#     update_bucket_policy
+    
+#     return 0
+# }
+
 # Function to create CloudFront distribution
 create_cloudfront_distribution() {
     if is_step_completed "cloudfront"; then
         local distribution_id=$(get_status "distribution_id" "")
         local distribution_domain=$(get_status "distribution_domain" "")
-        log "INFO" "CloudFront distribution already created (ID: $distribution_id, Domain: $distribution_domain)"
-        return 0
+        
+        # Check if the distribution info is empty or malformed despite being marked as completed
+        if [ -z "$distribution_id" ] || [ -z "$distribution_domain" ] || [[ "$distribution_id" == *$'\n'* ]]; then
+            log "WARN" "CloudFront distribution marked as completed but information is missing or malformed, will attempt to retrieve"
+            # Reset the completion status
+            update_status "cloudfront_completed" "false"
+        else
+            log "INFO" "CloudFront distribution already created (ID: $distribution_id, Domain: $distribution_domain)"
+            return 0
+        fi
     fi
     
     log "STEP" "Creating CloudFront distribution for $DOMAIN"
@@ -466,13 +732,46 @@ create_cloudfront_distribution() {
     local cert_arn=$(get_status "certificate_arn" "")
     local oac_id=$(get_status "oac_id" "")
     
+    # Check if a distribution already exists for this domain
+    log "INFO" "Checking if distribution already exists for $DOMAIN"
+    local distributions=$($aws_cmd cloudfront list-distributions --output json)
+    
+    if [ $? -ne 0 ]; then
+        log "ERROR" "Failed to list CloudFront distributions"
+        return 1
+    fi
+    
+    # Try to find a distribution with our domain in the aliases
+    # First check if the domain exists in any Items array to avoid jq errors
+    local has_domain=$(echo "$distributions" | jq -r --arg domain "$DOMAIN" '.DistributionList.Items[].Aliases | select(.Items != null) | .Items[] | select(. == $domain)' 2>/dev/null)
+    
+    if [ -n "$has_domain" ]; then
+        # Find the distribution with this domain
+        local existing_dist_id=$(echo "$distributions" | jq -r --arg domain "$DOMAIN" '.DistributionList.Items[] | select(.Aliases.Items != null) | select(.Aliases.Items[] == $domain) | .Id' 2>/dev/null | head -n 1)
+        
+        if [ -n "$existing_dist_id" ]; then
+            # Get the domain name for the distribution
+            local existing_dist_domain=$(echo "$distributions" | jq -r --arg id "$existing_dist_id" '.DistributionList.Items[] | select(.Id == $id) | .DomainName' 2>/dev/null)
+            
+            log "INFO" "Found existing distribution for $DOMAIN (ID: $existing_dist_id, Domain: $existing_dist_domain)"
+            update_status "distribution_id" "$existing_dist_id"
+            update_status "distribution_domain" "$existing_dist_domain"
+            mark_step_completed "cloudfront"
+            
+            # Update S3 bucket policy
+            update_bucket_policy
+            
+            return 0
+        fi
+    fi
+    
     # Prepare distribution config
     local dist_config_file=$(mktemp)
     cat > "$dist_config_file" <<EOF
 {
     "CallerReference": "${DOMAIN}-$(date +%s)",
     "Aliases": {
-        "Quantity": 2,
+        "Quantity": 1,
         "Items": [
             "${DOMAIN}"
         ]
@@ -576,11 +875,17 @@ EOF
     
     if [ $? -ne 0 ]; then
         log "ERROR" "Failed to create CloudFront distribution"
-        exit 1
+        return 1
     fi
     
     local distribution_id=$(echo "$dist_result" | jq -r '.Distribution.Id')
     local distribution_domain=$(echo "$dist_result" | jq -r '.Distribution.DomainName')
+    
+    # Validate that we got valid values
+    if [ -z "$distribution_id" ] || [ -z "$distribution_domain" ]; then
+        log "ERROR" "Failed to extract distribution information from result"
+        return 1
+    fi
     
     log "SUCCESS" "CloudFront distribution created successfully"
     log "INFO" "Distribution ID: $distribution_id"
@@ -595,6 +900,7 @@ EOF
     
     return 0
 }
+
 
 # Function to update S3 bucket policy
 update_bucket_policy() {
@@ -649,6 +955,57 @@ EOF
 }
 
 # Function to create Route53 DNS records
+# create_dns_records() {
+#     if is_step_completed "dns"; then
+#         log "INFO" "DNS records already created"
+#         return 0
+#     fi
+    
+#     log "STEP" "Creating Route53 DNS records for $DOMAIN"
+    
+#     local aws_cmd="aws"
+#     if [ -n "$AWS_PROFILE" ]; then
+#         aws_cmd="$aws_cmd --profile $AWS_PROFILE"
+#     fi
+    
+#     local zone_id=$(get_status "zone_id" "")
+#     local distribution_domain=$(get_status "distribution_domain" "")
+    
+#     # Create A record aliases for domain and www subdomain
+#     local change_batch=$(cat <<EOF
+# {
+#     "Changes": [
+#         {
+#             "Action": "UPSERT",
+#             "ResourceRecordSet": {
+#                 "Name": "${DOMAIN}.",
+#                 "Type": "A",
+#                 "AliasTarget": {
+#                     "HostedZoneId": "Z2FDTNDATAQYW2",
+#                     "DNSName": "${distribution_domain}",
+#                     "EvaluateTargetHealth": false
+#                 }
+#             }
+#         }
+#     ]
+# }
+# EOF
+# )
+    
+#     $aws_cmd route53 change-resource-record-sets \
+#         --hosted-zone-id "$zone_id" \
+#         --change-batch "$change_batch"
+    
+#     if [ $? -ne 0 ]; then
+#         log "ERROR" "Failed to create DNS records"
+#         return 1
+#     fi
+    
+#     log "SUCCESS" "DNS records created successfully"
+#     mark_step_completed "dns"
+#     return 0
+# }
+
 create_dns_records() {
     if is_step_completed "dns"; then
         log "INFO" "DNS records already created"
@@ -665,14 +1022,21 @@ create_dns_records() {
     local zone_id=$(get_status "zone_id" "")
     local distribution_domain=$(get_status "distribution_domain" "")
     
-    # Create A record aliases for domain and www subdomain
+    # Sanity check for empty distribution domain
+    if [ -z "$distribution_domain" ]; then
+        log "ERROR" "Distribution domain is empty, cannot create DNS records"
+        log "INFO" "Make sure the CloudFront distribution was created successfully"
+        return 1
+    fi
+    
+    # Create A record aliases for domain
     local change_batch=$(cat <<EOF
 {
     "Changes": [
         {
             "Action": "UPSERT",
             "ResourceRecordSet": {
-                "Name": "${DOMAIN}",
+                "Name": "${DOMAIN}.",
                 "Type": "A",
                 "AliasTarget": {
                     "HostedZoneId": "Z2FDTNDATAQYW2",
@@ -699,6 +1063,7 @@ EOF
     mark_step_completed "dns"
     return 0
 }
+
 
 # Function to upload sample content
 upload_sample_content() {
