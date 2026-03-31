@@ -19,6 +19,7 @@ NC='\033[0m' # No Color
 
 # Display usage information
 usage() {
+    local exit_code="${1:-1}"
     echo "Usage: $0 [options]"
     echo "Options:"
     echo "  --status-file <file>         Path to status file from the original deployment (required)"
@@ -28,7 +29,7 @@ usage() {
     echo
     echo "Example:"
     echo "  $0 --status-file ~/.aws-redirect-status.json"
-    exit 1
+    exit "$exit_code"
 }
 
 # Log formatted messages
@@ -497,7 +498,7 @@ main() {
                 shift
                 ;;
             --help)
-                usage
+                usage 0
                 ;;
             *)
                 log "ERROR" "Unknown option: $1"

@@ -20,6 +20,7 @@ NC='\033[0m' # No Color
 
 # Display usage information
 usage() {
+    local exit_code="${1:-1}"
     echo "Usage: $0 [options]"
     echo "Options:"
     echo "  --source-domains <domains>   Comma-separated list of source domains to redirect (required)"
@@ -32,7 +33,7 @@ usage() {
     echo
     echo "Example:"
     echo "  $0 --source-domains example.com,www.example.com --target-domain target.example.com"
-    exit 1
+    exit "$exit_code"
 }
 
 # Log formatted messages
@@ -803,7 +804,7 @@ main() {
                 shift 2
                 ;;
             --help)
-                usage
+                usage 0
                 ;;
             *)
                 log "ERROR" "Unknown option: $1"

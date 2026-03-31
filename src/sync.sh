@@ -14,19 +14,22 @@ NC='\033[0m' # No Color
 
 # Default values
 AUTO_CONFIRM=false
-STATUS_FILE="deployment_status.json"
+STATUS_FILE=""
 LOCAL_DIR="."
 INVALIDATE_PATHS="/*"
 USE_GZIP=false
 EXCLUDE_PATTERN=""
 DRY_RUN=false
+DOMAIN=""
 
 # Function to display usage information
 usage() {
+  local exit_code="${1:-1}"
   echo "Usage: $0 [options]"
   echo ""
   echo "Options:"
-  echo "  --status-file <file>     Status file from deployment (default: deployment_status.json)"
+  echo "  --status-file <file>     Status file from deployment"
+  echo "  --domain <domain>        Domain to derive default status file (.deploy-status-<domain>.json)"
   echo "  --source <directory>     Local directory to sync (default: current directory)"
   echo "  --profile <profile>      AWS CLI profile to use"
   echo "  --region <region>        AWS region (default: us-east-1)"
@@ -36,7 +39,7 @@ usage() {
   echo "  --dry-run                Show what would be uploaded without making changes"
   echo "  -y, --yes                Skip all confirmation prompts"
   echo "  --help                   Display this help message"
-  exit 1
+  exit "$exit_code"
 }
 
 # Function to log messages with timestamp
@@ -92,7 +95,7 @@ get_metadata() {
     return 1
   fi
   
-  local value=$(jq -r --arg step "$step" --arg key "$key" '.steps[$step].metadata[$key] // empty' "$STATUS_FILE")
+  local value=$(jq -r --arg step "$step" --arg key "$key" '.steps[$step].metadata[$key] // .[$key] // empty' "$STATUS_FILE")
   
   if [ -z "$value" ] || [ "$value" = "null" ]; then
     return 1
@@ -323,6 +326,11 @@ main() {
         shift
         shift
         ;;
+      --domain)
+        DOMAIN="$2"
+        shift
+        shift
+        ;;
       --source)
         LOCAL_DIR="$2"
         shift
@@ -363,7 +371,7 @@ main() {
         shift
         ;;
       --help)
-        usage
+        usage 0
         ;;
       *)
         echo "Unknown option: $1"
@@ -371,6 +379,14 @@ main() {
         ;;
     esac
   done
+
+  if [ -z "$STATUS_FILE" ]; then
+    if [ -n "$DOMAIN" ]; then
+      STATUS_FILE=".deploy-status-${DOMAIN}.json"
+    else
+      STATUS_FILE="deployment_status.json"
+    fi
+  fi
   
   # Check if status file exists
   if [ ! -f "$STATUS_FILE" ]; then

@@ -25,16 +25,20 @@ NC='\033[0m' # No Color
 # Default values
 AWS_PROFILE=""
 STATUS_FILE=""
+DOMAIN=""
 AUTO_APPROVE=false
 
 # Function to display script usage
 usage() {
+    local exit_code="${1:-1}"
     echo -e "${BOLD}Usage:${NC} $0 --status-file status.json [options]"
     echo -e "${BOLD}Options:${NC}"
     echo "  --status-file FILE     Path to the status JSON file (required)"
+    echo "  --domain DOMAIN        Domain used to derive default status file (.deploy-status-<domain>.json)"
     echo "  --profile PROFILE      AWS CLI profile (optional)"
     echo "  --yes                  Skip all confirmation prompts"
-    exit 1
+    echo "  --help                 Display this help message"
+    exit "$exit_code"
 }
 
 # Function to display messages with timestamp
@@ -464,6 +468,11 @@ main() {
                 shift
                 shift
                 ;;
+            --domain)
+                DOMAIN="$2"
+                shift
+                shift
+                ;;
             --profile)
                 AWS_PROFILE="$2"
                 shift
@@ -474,7 +483,7 @@ main() {
                 shift
                 ;;
             --help)
-                usage
+                usage 0
                 ;;
             *)
                 echo "Unknown option: $1"
@@ -482,6 +491,10 @@ main() {
                 ;;
         esac
     done
+
+    if [ -z "$STATUS_FILE" ] && [ -n "$DOMAIN" ]; then
+        STATUS_FILE=".deploy-status-${DOMAIN}.json"
+    fi
     
     # Check for required parameters
     if [ -z "$STATUS_FILE" ]; then

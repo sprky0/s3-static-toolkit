@@ -39,6 +39,7 @@ CERTIFICATE_WAIT_INTERVAL=10
 
 # Function to display script usage
 usage() {
+    local exit_code="${1:-1}"
     echo -e "${BOLD}Usage:${NC} $0 --domain yourdomain.com [options]"
     echo -e "${BOLD}Options:${NC}"
     echo "  --domain DOMAIN     Domain name (required)"
@@ -46,7 +47,8 @@ usage() {
     echo "  --region REGION     AWS region (default: us-east-1)"
     echo "  --yes               Skip all confirmation prompts"
     echo "  --status-file FILE  Custom status file path"
-    exit 1
+    echo "  --help              Display this help message"
+    exit "$exit_code"
 }
 
 # Function to display messages with timestamp
@@ -1003,7 +1005,7 @@ main() {
                 shift
                 ;;
             --help)
-                usage
+                usage 0
                 ;;
             *)
                 echo "Unknown option: $1"
