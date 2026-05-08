@@ -8,22 +8,8 @@
 
 set -e
 
-# Color definitions
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-BLUE='\033[0;34m'
-MAGENTA='\033[0;35m'
-CYAN='\033[0;36m'
-BOLD='\033[1m'
-BG_RED='\033[41m'
-WHITE='\033[1;37m'
-NC='\033[0m' # No Color
-
-# Render a destructive verb LOUDLY. Used in the plan so the user can't miss it.
-destruct() {
-    echo -ne "${BOLD}${BG_RED}${WHITE} $1 ${NC}"
-}
+# shellcheck disable=SC1091
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 
 # Default values
 AWS_PROFILE=""
@@ -43,35 +29,6 @@ usage() {
     echo "  --help                 Display this help message"
     exit "$exit_code"
 }
-
-# Function to display messages with timestamp
-log() {
-    local level=$1
-    local message=$2
-    local timestamp=$(date "+%Y-%m-%d %H:%M:%S")
-    
-    case $level in
-        "INFO") 
-            echo -e "${BLUE}[INFO]${NC} ${timestamp} - ${message}"
-            ;;
-        "SUCCESS") 
-            echo -e "${GREEN}[SUCCESS]${NC} ${timestamp} - ${message}"
-            ;;
-        "WARN") 
-            echo -e "${YELLOW}[WARNING]${NC} ${timestamp} - ${message}"
-            ;;
-        "ERROR") 
-            echo -e "${RED}[ERROR]${NC} ${timestamp} - ${message}"
-            ;;
-        "STEP") 
-            echo -e "\n${MAGENTA}[STEP]${NC} ${timestamp} - ${BOLD}${message}${NC}"
-            ;;
-        "DEBUG")
-            echo -e "${CYAN}[DEBUG]${NC} ${timestamp} - ${message}"
-            ;;
-    esac
-}
-
 
 # Function to check for required commands
 check_prerequisites() {

@@ -2,9 +2,10 @@
 #───────────────────────────────────────────────────────────────────────────────
 # lib/common.sh - Common helpers for s3-static-toolkit scripts
 # Modeled after ~/access/aliases/lib/common.sh
+#
+# NOTE: this file does NOT enable `set -euo pipefail`. Sourcing scripts inherit
+# `set` flags, so we leave error-handling discipline to each caller.
 #───────────────────────────────────────────────────────────────────────────────
-
-set -euo pipefail
 
 # Determine this file's directory (bash/zsh compatible best-effort)
 if [[ -n "${BASH_SOURCE[0]:-}" ]]; then
@@ -36,6 +37,29 @@ log_info() { echo -e "${BLUE}[INFO]${NC} $(date "+%Y-%m-%d %H:%M:%S") - $*"; }
 log_success() { echo -e "${GREEN}[SUCCESS]${NC} $(date "+%Y-%m-%d %H:%M:%S") - $*"; }
 log_warn() { echo -e "${YELLOW}[WARNING]${NC} $(date "+%Y-%m-%d %H:%M:%S") - $*"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $(date "+%Y-%m-%d %H:%M:%S") - $*"; }
+log_step() { echo -e "\n${MAGENTA}[STEP]${NC} $(date "+%Y-%m-%d %H:%M:%S") - ${BOLD}$*${NC}"; }
+log_debug() { echo -e "${CYAN}[DEBUG]${NC} $(date "+%Y-%m-%d %H:%M:%S") - $*"; }
+
+# Two-arg dispatcher used pervasively by the toolkit's scripts:
+#   log "INFO" "message"
+#   log "ERROR" "message"
+log() {
+	local level="$1"; shift
+	case "$level" in
+		INFO)    log_info    "$*" ;;
+		SUCCESS) log_success "$*" ;;
+		WARN)    log_warn    "$*" ;;
+		ERROR)   log_error   "$*" ;;
+		STEP)    log_step    "$*" ;;
+		DEBUG)   log_debug   "$*" ;;
+		*)       echo -e "[${level}] $(date "+%Y-%m-%d %H:%M:%S") - $*" ;;
+	esac
+}
+
+# Render a destructive verb LOUDLY (white-on-red pill). Used in cleanup plans.
+destruct() {
+	echo -ne "${BOLD}${BG_RED}${WHITE} $1 ${NC}"
+}
 
 confirm() {
 	local prompt="$1"

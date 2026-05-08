@@ -9,48 +9,14 @@
 
 set -e
 
+# shellcheck disable=SC1091
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
+
 # Default values
 REGION="us-east-1"
 PROFILE=""
 YES_FLAG=false
 STATUS_FILE="$HOME/.aws-redirect-status.json"
-
-# Color codes for logging
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-BLUE='\033[0;34m'
-BOLD='\033[1m'
-NC='\033[0m' # No Color
-
-# Function to log messages with timestamp
-log() {
-    local level=$1
-    local message=$2
-    local timestamp=$(date "+%Y-%m-%d %H:%M:%S")
-    
-    case $level in
-        "INFO") 
-            echo -e "${BLUE}[INFO]${NC} ${timestamp} - ${message}"
-            ;;
-        "SUCCESS") 
-            echo -e "${GREEN}[SUCCESS]${NC} ${timestamp} - ${message}"
-            ;;
-        "WARN") 
-            echo -e "${YELLOW}[WARNING]${NC} ${timestamp} - ${message}"
-            ;;
-        "ERROR") 
-            echo -e "${RED}[ERROR]${NC} ${timestamp} - ${message}"
-            ;;
-        "STEP") 
-            echo -e "\n${MAGENTA}[STEP]${NC} ${timestamp} - ${BOLD}${message}${NC}"
-            ;;
-        "DEBUG")
-            echo -e "${CYAN}[DEBUG]${NC} ${timestamp} - ${message}"
-            ;;
-    esac
-}
-
 
 # Display usage information
 usage() {
