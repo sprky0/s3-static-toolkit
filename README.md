@@ -71,10 +71,33 @@ Options:
   --profile PROFILE            AWS CLI profile (optional)
   --region REGION              AWS region (default: us-east-1)
   --status-file FILE           Custom status file path
+  --create-scoped-user         Create an IAM user scoped to this site only
   --yes                        Skip all confirmation prompts
   --help                       Display this help message
 
 ```
+
+#### Scoped IAM user (`--create-scoped-user`)
+
+Pass `--create-scoped-user` to provision an IAM user named `${domain}-site-admin`
+alongside the site. Its inline policy permits **only**:
+
+- `s3:ListBucket` / `s3:GetBucketLocation` on the provisioned bucket
+- `s3:GetObject` / `PutObject` / `DeleteObject` and the `*ObjectTagging` /
+  `*ObjectAcl` variants on objects in that bucket
+- `cloudfront:CreateInvalidation` / `GetInvalidation` / `ListInvalidations` on
+  the provisioned distribution
+
+This is enough for `sync.sh` (or any equivalent uploader) to push content and
+purge the CDN, and nothing else — it cannot touch other buckets, other
+distributions, IAM, Route53, or ACM. Useful for handing site-admin access to a
+teammate or a CI runner without granting account-wide privileges.
+
+The access key is printed once at the end of deployment and **is not written to
+the status file**. The user name, inline-policy name, and access key ID *are*
+stored in the status file so that `remove-site.sh` can clean up later. If the
+secret is lost, run `remove-site.sh` and re-deploy with `--create-scoped-user`
+to regenerate.
 
 ### Redirect
 

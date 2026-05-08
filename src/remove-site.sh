@@ -225,6 +225,33 @@ plan_s3_bucket() {
     echo
 }
 
+plan_scoped_iam_user() {
+    local user_name=$(jq -r '.scoped_user_name // ""' "$STATUS_FILE")
+    if [ -z "$user_name" ] || [ "$user_name" = "null" ]; then return 0; fi
+
+    local aws_cmd=$(aws_cli)
+    echo -e "  ${BOLD}Scoped IAM user${NC}"
+    echo -e "    Name:   $user_name"
+
+    if ! $aws_cmd iam get-user --user-name "$user_name" &>/dev/null; then
+        echo -e "    ${YELLOW}(does not exist in AWS; will skip)${NC}"
+        echo
+        return 0
+    fi
+
+    local policy_name=$(jq -r '.scoped_user_policy_name // ""' "$STATUS_FILE")
+    local keys
+    keys=$($aws_cmd iam list-access-keys --user-name "$user_name" --query 'AccessKeyMetadata[].AccessKeyId' --output text 2>/dev/null)
+    if [ -n "$policy_name" ] && [ "$policy_name" != "null" ]; then
+        echo -e "    Inline policy: $policy_name  $(destruct DELETE)"
+    fi
+    if [ -n "$keys" ] && [ "$keys" != "None" ]; then
+        echo -e "    Access keys:   $keys  $(destruct DELETE)"
+    fi
+    echo -e "    Action: $(destruct DELETE) IAM user"
+    echo
+}
+
 plan_dns_records() {
     local zone_id=$(jq -r '.zone_id // ""' "$STATUS_FILE")
     local domain=$(jq -r '.domain // ""' "$STATUS_FILE")
@@ -271,6 +298,7 @@ print_plan_and_confirm() {
     plan_validation_records
     plan_s3_bucket
     plan_dns_records
+    plan_scoped_iam_user
 
     echo -e "${BOLD}${RED}This will permanently delete every resource shown above.${NC}"
     echo -e "${BOLD}Anything not in the status file will be left untouched.${NC}"
@@ -556,6 +584,58 @@ remove_s3_bucket() {
     fi
 }
 
+# Function to remove the scoped IAM user (if one was created via deploy-site.sh
+# --create-scoped-user). Deletes inline policy + all access keys before the user.
+remove_scoped_iam_user() {
+    log "STEP" "Removing scoped IAM user"
+
+    local aws_cmd="aws"
+    if [ -n "$AWS_PROFILE" ]; then
+        aws_cmd="$aws_cmd --profile $AWS_PROFILE"
+    fi
+
+    local user_name=$(jq -r '.scoped_user_name // ""' "$STATUS_FILE")
+    if [ -z "$user_name" ] || [ "$user_name" = "null" ]; then
+        log "INFO" "No scoped IAM user found in status file"
+        return 0
+    fi
+
+    log "INFO" "Processing IAM user: $user_name"
+
+    if ! $aws_cmd iam get-user --user-name "$user_name" &>/dev/null; then
+        log "INFO" "IAM user $user_name does not exist, skipping"
+        return 0
+    fi
+
+    # Delete the inline policy we attached, if it's still there.
+    local policy_name=$(jq -r '.scoped_user_policy_name // ""' "$STATUS_FILE")
+    if [ -n "$policy_name" ] && [ "$policy_name" != "null" ]; then
+        if $aws_cmd iam get-user-policy --user-name "$user_name" --policy-name "$policy_name" &>/dev/null; then
+            log "INFO" "Deleting inline policy $policy_name"
+            $aws_cmd iam delete-user-policy --user-name "$user_name" --policy-name "$policy_name"
+        fi
+    fi
+
+    # Delete every access key on the user. AWS won't delete a user that still
+    # owns access keys, and rotating outside the toolkit is fair game so we
+    # don't assume there's only the one we created.
+    local keys
+    keys=$($aws_cmd iam list-access-keys --user-name "$user_name" --query 'AccessKeyMetadata[].AccessKeyId' --output text 2>/dev/null)
+    if [ -n "$keys" ] && [ "$keys" != "None" ]; then
+        for key in $keys; do
+            log "INFO" "Deleting access key $key"
+            $aws_cmd iam delete-access-key --user-name "$user_name" --access-key-id "$key"
+        done
+    fi
+
+    log "INFO" "Deleting IAM user $user_name"
+    if $aws_cmd iam delete-user --user-name "$user_name"; then
+        log "SUCCESS" "Deleted IAM user $user_name"
+    else
+        log "ERROR" "Failed to delete IAM user $user_name (it may have manually-attached resources)"
+    fi
+}
+
 # Function to remove Route53 DNS records
 remove_dns_records() {
     log "STEP" "Removing Route53 DNS records"
@@ -695,6 +775,7 @@ main() {
     remove_certificate
     remove_s3_bucket
     remove_dns_records
+    remove_scoped_iam_user
     
     # Success message
     log "SUCCESS" "Cleanup completed"
