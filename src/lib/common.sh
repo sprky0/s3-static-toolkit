@@ -103,3 +103,35 @@ default_redirect_status_file() {
 	home_dir="$(ensure_state_dir)"
 	echo "${home_dir}/redirect-${target_domain}.json"
 }
+
+# find_zone_for_domain DOMAIN [AWS_PROFILE]
+#
+# Walk labels from longest to shortest looking up each suffix as a Route53
+# hosted zone. Returns the longest matching zone — for "blog.foo.example.com"
+# it tries "blog.foo.example.com", "foo.example.com", "example.com" in order
+# and returns the first hit. Correctly handles multi-part TLDs (.co.uk etc).
+#
+# Prints "ZONE_ID|ZONE_NAME" on stdout when a zone is found (zone name without
+# trailing dot). Prints nothing when no zone matches. Always exits 0 — caller
+# decides whether absence is an error.
+find_zone_for_domain() {
+	local domain="$1"
+	local aws_profile="${2:-}"
+	local aws_cmd="aws"
+	[[ -n "$aws_profile" ]] && aws_cmd="aws --profile $aws_profile"
+
+	local candidate="${domain%.}"
+	while [[ "$candidate" == *.* ]]; do
+		local zone_id
+		zone_id=$($aws_cmd route53 list-hosted-zones-by-name \
+			--dns-name "$candidate." --max-items 1 \
+			--query "HostedZones[?Name=='$candidate.'].Id" \
+			--output text 2>/dev/null | head -n1 | sed 's|^/hostedzone/||')
+		if [[ -n "$zone_id" && "$zone_id" != "None" ]]; then
+			echo "${zone_id}|${candidate}"
+			return 0
+		fi
+		candidate="${candidate#*.}"
+	done
+	return 0
+}

@@ -17,6 +17,7 @@ AWS_PROFILE=""
 DOMAIN=""
 STATUS_FILE=""
 AUTO_APPROVE=false
+CREATE_SCOPED_USER=false
 TIMEOUT_RETRIES=5
 CERTIFICATE_WAIT_SECONDS=120
 CERTIFICATE_WAIT_INTERVAL=10
@@ -26,12 +27,17 @@ usage() {
     local exit_code="${1:-1}"
     echo -e "${BOLD}Usage:${NC} $0 --domain yourdomain.com [options]"
     echo -e "${BOLD}Options:${NC}"
-    echo "  --domain DOMAIN     Domain name (required)"
-    echo "  --profile PROFILE   AWS CLI profile (optional)"
-    echo "  --region REGION     AWS region (default: us-east-1)"
-    echo "  --yes               Skip all confirmation prompts"
-    echo "  --status-file FILE  Custom status file path"
-    echo "  --help              Display this help message"
+    echo "  --domain DOMAIN          Domain name (required)"
+    echo "  --profile PROFILE        AWS CLI profile (optional)"
+    echo "  --region REGION          AWS region (default: us-east-1)"
+    echo "  --yes                    Skip all confirmation prompts"
+    echo "  --status-file FILE       Custom status file path"
+    echo "  --create-scoped-user     Also create an IAM user scoped to this site's"
+    echo "                           bucket + distribution (read/write/delete on S3,"
+    echo "                           CreateInvalidation on CloudFront only). Access"
+    echo "                           key is printed once and NOT saved to the status"
+    echo "                           file."
+    echo "  --help                   Display this help message"
     exit "$exit_code"
 }
 
@@ -166,27 +172,33 @@ confirm_action() {
 check_hosted_zone() {
     if is_step_completed "hosted_zone"; then
         local zone_id=$(get_status "zone_id" "")
-        log "INFO" "Hosted zone already verified (Zone ID: $zone_id)"
+        local zone_name=$(get_status "zone_name" "")
+        log "INFO" "Hosted zone already verified (Zone ID: $zone_id${zone_name:+, Zone: $zone_name})"
         return 0
     fi
-    
+
     log "STEP" "Checking Route53 hosted zone for $DOMAIN"
-    
-    local aws_cmd="aws"
-    if [ -n "$AWS_PROFILE" ]; then
-        aws_cmd="$aws_cmd --profile $AWS_PROFILE"
-    fi
-    
-    local zone_id=$($aws_cmd route53 list-hosted-zones --query "HostedZones[?Name=='$DOMAIN.' || Name=='$DOMAIN'].Id" --output text | sed 's/\/hostedzone\///')
-    
-    if [ -z "$zone_id" ]; then
-        log "ERROR" "No Route53 hosted zone found for $DOMAIN"
-        log "INFO" "Please create a hosted zone for $DOMAIN in Route53 and try again."
+
+    local match
+    match=$(find_zone_for_domain "$DOMAIN" "$AWS_PROFILE")
+
+    if [ -z "$match" ]; then
+        log "ERROR" "No Route53 hosted zone found for $DOMAIN or any parent domain"
+        log "INFO" "Please create a hosted zone covering $DOMAIN in Route53 and try again."
         exit 1
     fi
-    
-    log "SUCCESS" "Found Route53 hosted zone for $DOMAIN (Zone ID: $zone_id)"
+
+    local zone_id="${match%%|*}"
+    local zone_name="${match#*|}"
+
+    if [ "$zone_name" = "$DOMAIN" ]; then
+        log "SUCCESS" "Found Route53 hosted zone for $DOMAIN (Zone ID: $zone_id)"
+    else
+        log "SUCCESS" "Found parent Route53 hosted zone $zone_name covering $DOMAIN (Zone ID: $zone_id)"
+    fi
+
     update_status "zone_id" "$zone_id"
+    update_status "zone_name" "$zone_name"
     mark_step_completed "hosted_zone"
     return 0
 }
@@ -1010,6 +1022,161 @@ verify_deployment() {
     return 0
 }
 
+# Function to optionally create a scoped IAM user for site administration.
+# The user gets an inline policy permitting object-level S3 access on the
+# provisioned bucket and CreateInvalidation on the provisioned distribution
+# only. The access key secret is printed ONCE and is NEVER written to the
+# status file.
+create_scoped_user() {
+    if [ "$CREATE_SCOPED_USER" != true ]; then
+        return 0
+    fi
+
+    if is_step_completed "scoped_user"; then
+        local existing_user=$(get_status "scoped_user_name" "")
+        log "INFO" "Scoped IAM user already provisioned (User: $existing_user)"
+        log "INFO" "If the secret was lost, delete the user via remove-site.sh and re-run."
+        return 0
+    fi
+
+    log "STEP" "Creating scoped IAM user for $DOMAIN"
+
+    local aws_cmd="aws"
+    if [ -n "$AWS_PROFILE" ]; then
+        aws_cmd="$aws_cmd --profile $AWS_PROFILE"
+    fi
+
+    local bucket_name=$(get_status "bucket_name" "")
+    local distribution_id=$(get_status "distribution_id" "")
+    local account_id=$(get_status "account_id" "")
+
+    if [ -z "$bucket_name" ] || [ -z "$distribution_id" ] || [ -z "$account_id" ]; then
+        log "ERROR" "Cannot create scoped user before bucket, distribution, and account ID are known"
+        return 1
+    fi
+
+    local user_name="${DOMAIN}-site-admin"
+    local policy_name="${DOMAIN}-site-admin-policy"
+
+    # Create the IAM user (idempotent: ignore EntityAlreadyExists)
+    if $aws_cmd iam get-user --user-name "$user_name" &>/dev/null; then
+        log "INFO" "IAM user $user_name already exists, reusing"
+    else
+        log "INFO" "Creating IAM user $user_name"
+        if ! $aws_cmd iam create-user \
+            --user-name "$user_name" \
+            --tags "Key=ManagedBy,Value=s3-static-toolkit" "Key=Domain,Value=${DOMAIN}" \
+            >/dev/null; then
+            log "ERROR" "Failed to create IAM user $user_name"
+            return 1
+        fi
+    fi
+
+    # Attach the inline scoped policy. put-user-policy is idempotent (overwrites).
+    local policy_file=$(mktemp)
+    cat > "$policy_file" <<EOF
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "S3BucketLevel",
+            "Effect": "Allow",
+            "Action": [
+                "s3:ListBucket",
+                "s3:GetBucketLocation"
+            ],
+            "Resource": "arn:aws:s3:::${bucket_name}"
+        },
+        {
+            "Sid": "S3ObjectLevel",
+            "Effect": "Allow",
+            "Action": [
+                "s3:GetObject",
+                "s3:PutObject",
+                "s3:DeleteObject",
+                "s3:GetObjectTagging",
+                "s3:PutObjectTagging",
+                "s3:DeleteObjectTagging",
+                "s3:GetObjectAcl",
+                "s3:PutObjectAcl"
+            ],
+            "Resource": "arn:aws:s3:::${bucket_name}/*"
+        },
+        {
+            "Sid": "CloudFrontInvalidation",
+            "Effect": "Allow",
+            "Action": [
+                "cloudfront:CreateInvalidation",
+                "cloudfront:GetInvalidation",
+                "cloudfront:ListInvalidations"
+            ],
+            "Resource": "arn:aws:cloudfront::${account_id}:distribution/${distribution_id}"
+        }
+    ]
+}
+EOF
+
+    log "INFO" "Attaching inline policy $policy_name"
+    if ! $aws_cmd iam put-user-policy \
+        --user-name "$user_name" \
+        --policy-name "$policy_name" \
+        --policy-document "file://${policy_file}"; then
+        rm -f "$policy_file"
+        log "ERROR" "Failed to attach inline policy $policy_name"
+        return 1
+    fi
+    rm -f "$policy_file"
+
+    # Only create an access key if the user has none. AWS limits to 2 keys per
+    # user; we don't want to silently consume a slot on a re-run.
+    local existing_keys
+    existing_keys=$($aws_cmd iam list-access-keys --user-name "$user_name" --query 'AccessKeyMetadata[].AccessKeyId' --output text)
+    if [ -n "$existing_keys" ] && [ "$existing_keys" != "None" ]; then
+        log "WARN" "User $user_name already has access keys; skipping key creation."
+        log "INFO" "Existing key IDs: $existing_keys"
+        update_status "scoped_user_name" "$user_name"
+        update_status "scoped_user_policy_name" "$policy_name"
+        mark_step_completed "scoped_user"
+        return 0
+    fi
+
+    log "INFO" "Creating access key for $user_name"
+    local key_result
+    key_result=$($aws_cmd iam create-access-key --user-name "$user_name" --output json)
+    if [ $? -ne 0 ] || [ -z "$key_result" ]; then
+        log "ERROR" "Failed to create access key"
+        return 1
+    fi
+
+    local access_key_id=$(echo "$key_result" | jq -r '.AccessKey.AccessKeyId')
+    local secret_access_key=$(echo "$key_result" | jq -r '.AccessKey.SecretAccessKey')
+
+    update_status "scoped_user_name" "$user_name"
+    update_status "scoped_user_policy_name" "$policy_name"
+    update_status "scoped_user_access_key_id" "$access_key_id"
+    mark_step_completed "scoped_user"
+
+    # Print credentials prominently. This is the only time the secret is shown.
+    echo
+    echo -e "${BOLD}${BG_RED}${WHITE}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${BOLD}${BG_RED}${WHITE}║   SCOPED IAM USER CREDENTIALS — SHOWN ONCE, COPY NOW         ║${NC}"
+    echo -e "${BOLD}${BG_RED}${WHITE}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo
+    echo -e "  ${BOLD}User name:${NC}          $user_name"
+    echo -e "  ${BOLD}Access Key ID:${NC}      $access_key_id"
+    echo -e "  ${BOLD}Secret Access Key:${NC}  $secret_access_key"
+    echo
+    echo -e "${YELLOW}Permissions: read/write/delete objects in s3://${bucket_name},${NC}"
+    echo -e "${YELLOW}             CreateInvalidation on distribution ${distribution_id}.${NC}"
+    echo
+    echo -e "${RED}${BOLD}The secret is NOT stored in the status file and cannot be retrieved.${NC}"
+    echo -e "${RED}${BOLD}If lost, delete the user via remove-site.sh and re-run with --create-scoped-user.${NC}"
+    echo
+
+    log "SUCCESS" "Scoped IAM user $user_name created"
+    return 0
+}
+
 # Function to display deployment summary
 display_summary() {
     log "STEP" "Deployment Summary"
@@ -1022,6 +1189,10 @@ display_summary() {
     echo -e "${BOLD}CloudFront Distribution:${NC} $(get_status "distribution_id" "N/A")"
     echo -e "${BOLD}Distribution Domain:${NC} $(get_status "distribution_domain" "N/A")"
     echo -e "${BOLD}Status File:${NC} $STATUS_FILE"
+    local scoped_user=$(get_status "scoped_user_name" "")
+    if [ -n "$scoped_user" ]; then
+        echo -e "${BOLD}Scoped IAM User:${NC} $scoped_user (Access Key: $(get_status "scoped_user_access_key_id" "N/A"))"
+    fi
     echo
     echo -e "${CYAN}╔════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${CYAN}║                      ${BOLD}NEXT STEPS${NC}${CYAN}                            ║${NC}"
@@ -1084,6 +1255,10 @@ main() {
                 shift
                 shift
                 ;;
+            --create-scoped-user)
+                CREATE_SCOPED_USER=true
+                shift
+                ;;
             --help)
                 usage 0
                 ;;
@@ -1138,7 +1313,8 @@ main() {
     invalidate_cache
     wait_for_distribution
     verify_deployment
-    
+    create_scoped_user
+
     # Display summary
     display_summary
 }
