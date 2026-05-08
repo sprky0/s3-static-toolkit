@@ -119,11 +119,14 @@ check_aws_config() {
     
     local account_id=$($aws_cmd sts get-caller-identity --query Account --output text)
     local user=$($aws_cmd sts get-caller-identity --query Arn --output text)
-    
+
     log "INFO" "AWS credentials configured correctly."
     log "INFO" "AWS Account: $account_id"
     log "INFO" "AWS User: $user"
     log "INFO" "AWS Region: $REGION"
+
+    # Persist account_id so remove-redirect.sh can verify bucket ownership.
+    update_status "account_id" "$account_id"
 }
 
 # Initialize or load status file
@@ -385,7 +388,10 @@ create_certificate() {
     if [ -n "$PROFILE" ]; then
         aws_cmd="aws --profile $PROFILE"
     fi
-    
+
+    # Certificate must be in us-east-1 for CloudFront
+    local cert_region="us-east-1"
+
     # Build domain list for certificate
     local san_array=()
     for domain in "${UNIQUE_DOMAINS[@]}"; do
@@ -396,30 +402,30 @@ create_certificate() {
             log "WARN" "Skipping invalid domain format: $domain"
         fi
     done
-    
+
     # Request certificate - use proper JSON array formatting for SANs
     local sans_json=$(printf '%s\n' "${san_array[@]}" | jq -R . | jq -s .)
-    
+
     # Request certificate
     local cert_arn=$($aws_cmd acm request-certificate \
         --domain-name "$TARGET_DOMAIN" \
         --subject-alternative-names "$sans_json" \
         --validation-method DNS \
-        --region "$REGION" \
+        --region "$cert_region" \
         --query CertificateArn \
         --output text)
-    
+
     update_status "certificate_arn" "$cert_arn"
     log "INFO" "Certificate requested: $cert_arn"
-    
+
     # Wait for certificate details to be available
     log "INFO" "Waiting for certificate details (this may take a moment)..."
     sleep 10
-    
+
     # Get validation records
     local validation_records=$($aws_cmd acm describe-certificate \
         --certificate-arn "$cert_arn" \
-        --region "$REGION" \
+        --region "$cert_region" \
         --query "Certificate.DomainValidationOptions[].{Domain:DomainName,Name:ResourceRecord.Name,Type:ResourceRecord.Type,Value:ResourceRecord.Value}")
     
     update_status_array "validation_records" "$validation_records"
@@ -463,7 +469,7 @@ create_certificate() {
     
     # Wait for certificate validation
     log "INFO" "Waiting for certificate validation (this may take 5-30 minutes)..."
-    $aws_cmd acm wait certificate-validated --certificate-arn "$cert_arn" --region "$REGION"
+    $aws_cmd acm wait certificate-validated --certificate-arn "$cert_arn" --region "$cert_region"
     
     log "INFO" "Certificate validated successfully."
     mark_step_completed "create_certificate"

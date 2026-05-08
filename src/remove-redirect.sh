@@ -18,8 +18,54 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 BLUE='\033[0;34m'
+MAGENTA='\033[0;35m'
+CYAN='\033[0;36m'
 BOLD='\033[1m'
+BG_RED='\033[41m'
+WHITE='\033[1;37m'
 NC='\033[0m' # No Color
+
+# Render a destructive verb LOUDLY. Used in the plan so the user can't miss it.
+destruct() {
+    echo -ne "${BOLD}${BG_RED}${WHITE} $1 ${NC}"
+}
+
+# Build the aws-cli command prefix once.
+aws_cli() {
+    local cmd="aws"
+    if [ -n "$PROFILE" ]; then
+        cmd="$cmd --profile $PROFILE"
+    fi
+    echo "$cmd"
+}
+
+# Resolve and validate the AWS account that owns the resources in $STATUS_FILE.
+# Populates the global $ACCOUNT_ID. Exits the script (not a subshell) on
+# mismatch. Do NOT call via command substitution — exit must hit the parent.
+# - If status file has account_id, the current caller MUST match it (else abort).
+# - If status file lacks account_id, fall back to current caller and warn.
+resolve_account_id() {
+    local status_account=$(jq -r '.account_id // ""' "$STATUS_FILE")
+    local aws_cmd=$(aws_cli)
+    local caller_account
+    if ! caller_account=$($aws_cmd sts get-caller-identity --query Account --output text 2>/dev/null); then
+        log "ERROR" "Cannot determine current AWS account. Check credentials/profile."
+        exit 1
+    fi
+
+    if [ -n "$status_account" ] && [ "$status_account" != "null" ]; then
+        if [ "$status_account" != "$caller_account" ]; then
+            log "ERROR" "Status file was created under account $status_account but current caller is $caller_account."
+            log "ERROR" "Refusing to touch resources that may not belong to you. Switch profile and retry."
+            exit 1
+        fi
+        ACCOUNT_ID="$status_account"
+    else
+        log "WARN" "Status file has no account_id; falling back to current caller ($caller_account)."
+        log "WARN" "Bucket ownership will still be enforced via --expected-bucket-owner."
+        ACCOUNT_ID="$caller_account"
+    fi
+}
 
 # Function to log messages with timestamp
 log() {
@@ -157,23 +203,182 @@ get_status_array() {
     jq -c --arg key "$key" '.[$key] // []' "$STATUS_FILE"
 }
 
-# Confirm action with user
-confirm_action() {
-    local message=$1
-    
+# =============================================================================
+# Plan: query AWS for the live state of every resource named in the status
+# file and print a single explicit list. NO destructive calls. Only resources
+# referenced in $STATUS_FILE are visible to this script.
+# =============================================================================
+
+plan_cloudfront_distribution() {
+    local id=$(get_status "cloudfront_distribution_id")
+    local region=$(get_status "region")
+    if [ -z "$id" ]; then return 0; fi
+
+    local aws_cmd=$(aws_cli)
+    echo -e "  ${BOLD}CloudFront distribution${NC}"
+    echo -e "    ID:     $id"
+
+    local dist
+    if dist=$($aws_cmd cloudfront get-distribution --id "$id" --region "$region" 2>/dev/null); then
+        local aliases=$(echo "$dist" | jq -r '[.Distribution.DistributionConfig.Aliases.Items // [] | .[]] | join(", ")')
+        local status=$(echo "$dist" | jq -r '.Distribution.Status')
+        local enabled=$(echo "$dist" | jq -r '.Distribution.DistributionConfig.Enabled')
+        echo -e "    Aliases: ${aliases:-<none>}"
+        echo -e "    Status:  $status (enabled=$enabled)"
+        if [ "$enabled" = "true" ]; then
+            echo -e "    Action:  $(destruct DISABLE) then $(destruct DELETE)"
+        else
+            echo -e "    Action:  $(destruct DELETE)"
+        fi
+    else
+        echo -e "    ${YELLOW}(does not exist in AWS; will skip)${NC}"
+    fi
+    echo
+}
+
+plan_certificate() {
+    local arn=$(get_status "certificate_arn")
+    if [ -z "$arn" ]; then return 0; fi
+
+    local aws_cmd=$(aws_cli)
+    echo -e "  ${BOLD}ACM certificate${NC}"
+    echo -e "    ARN:    $arn"
+    echo -e "    Region: us-east-1 (CloudFront)"
+
+    local cert
+    if cert=$($aws_cmd acm describe-certificate --certificate-arn "$arn" --region us-east-1 2>/dev/null); then
+        local domain=$(echo "$cert" | jq -r '.Certificate.DomainName')
+        local sans=$(echo "$cert" | jq -r '[.Certificate.SubjectAlternativeNames // [] | .[]] | join(", ")')
+        local status=$(echo "$cert" | jq -r '.Certificate.Status')
+        echo -e "    CN:     $domain"
+        echo -e "    SANs:   ${sans:-<none>}"
+        echo -e "    Status: $status"
+        echo -e "    Action: $(destruct DELETE)"
+    else
+        echo -e "    ${YELLOW}(does not exist in AWS; will skip)${NC}"
+    fi
+    echo
+}
+
+plan_dns_records() {
+    local dist_domain=$(get_status "cloudfront_domain")
+    local domain_zones=$(get_status_array "domain_zones")
+    local domains=$(get_status_array "domains")
+    if [ -z "$dist_domain" ] || [ "$domains" = "[]" ]; then return 0; fi
+
+    local aws_cmd=$(aws_cli)
+    echo -e "  ${BOLD}Route53 A-alias records (source domains)${NC}"
+    echo -e "    Target: $dist_domain"
+
+    echo "$domains" | jq -r '.[]' | while read -r domain; do
+        local zone_id=$(echo "$domain_zones" | jq -r --arg d "$domain" '.[] | select(.domain == $d) | .zone_id')
+        if [ -z "$zone_id" ]; then
+            echo -e "    - ${domain}  ${YELLOW}(no zone in status; will skip)${NC}"
+            continue
+        fi
+
+        local rec=$($aws_cmd route53 list-resource-record-sets \
+            --hosted-zone-id "$zone_id" \
+            --query "ResourceRecordSets[?Name=='${domain}.' && Type=='A']" \
+            --output json 2>/dev/null)
+
+        if [ -z "$rec" ] || [ "$(echo "$rec" | jq 'length')" -eq 0 ]; then
+            echo -e "    - ${domain}  (zone $zone_id) ${YELLOW}(no record; will skip)${NC}"
+            continue
+        fi
+
+        local target=$(echo "$rec" | jq -r '.[0].AliasTarget.DNSName // ""')
+        target=${target%.}
+        local our=${dist_domain%.}
+        if [[ "$target" == *"$our"* ]]; then
+            echo -e "    - ${domain}  (zone $zone_id, alias -> $target)  $(destruct DELETE)"
+        else
+            echo -e "    - ${domain}  (zone $zone_id, alias -> $target) ${YELLOW}(not our distribution; will skip)${NC}"
+        fi
+    done
+    echo
+}
+
+plan_validation_records() {
+    local validation_records=$(get_status_array "validation_records")
+    local domain_zones=$(get_status_array "domain_zones")
+    local target_zone_id=$(get_status "target_zone_id")
+    local target_domain=$(get_status "target_domain")
+    if [ "$validation_records" = "[]" ]; then return 0; fi
+
+    echo -e "  ${BOLD}Route53 ACM-validation CNAMEs${NC}"
+
+    echo "$validation_records" | jq -c '.[]' | while read -r record; do
+        local domain=$(echo "$record" | jq -r '.Domain')
+        local name=$(echo "$record" | jq -r '.Name')
+        name=${name%.}
+        local zone_id=""
+        if [ "$domain" = "$target_domain" ]; then
+            zone_id="$target_zone_id"
+        else
+            zone_id=$(echo "$domain_zones" | jq -r --arg d "$domain" '.[] | select(.domain == $d) | .zone_id')
+        fi
+        if [ -z "$zone_id" ]; then
+            echo -e "    - $name  ${YELLOW}(no zone in status; will skip)${NC}"
+        else
+            echo -e "    - $name  (zone $zone_id)  $(destruct DELETE)"
+        fi
+    done
+    echo
+}
+
+plan_s3_bucket() {
+    local bucket=$(get_status "s3_bucket_name")
+    if [ -z "$bucket" ]; then return 0; fi
+
+    local aws_cmd=$(aws_cli)
+    echo -e "  ${BOLD}S3 bucket${NC}"
+    echo -e "    Name:  $bucket"
+    echo -e "    Owner: account $ACCOUNT_ID (verified via --expected-bucket-owner)"
+
+    if $aws_cmd s3api head-bucket --bucket "$bucket" --expected-bucket-owner "$ACCOUNT_ID" &>/dev/null; then
+        local region=$($aws_cmd s3api get-bucket-location --bucket "$bucket" --expected-bucket-owner "$ACCOUNT_ID" --query 'LocationConstraint' --output text 2>/dev/null)
+        [ "$region" = "None" ] || [ -z "$region" ] && region="us-east-1"
+        echo -e "    Region: $region"
+        echo -e "    Action: $(destruct EMPTY) then $(destruct DELETE)"
+    else
+        echo -e "    ${YELLOW}(not owned by account $ACCOUNT_ID, or does not exist; will skip)${NC}"
+    fi
+    echo
+}
+
+# Print the plan and demand a typed-yes confirmation. Honors --yes.
+print_plan_and_confirm() {
+    echo
+    echo -e "${BOLD}${MAGENTA}╔═══════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${BOLD}${MAGENTA}║                 REDIRECT CLEANUP PLAN                     ║${NC}"
+    echo -e "${BOLD}${MAGENTA}╚═══════════════════════════════════════════════════════════╝${NC}"
+    echo -e "${BOLD}Status file:${NC} $STATUS_FILE"
+    echo -e "${BOLD}Source of truth:${NC} only resources listed above will be touched."
+    echo
+
+    plan_cloudfront_distribution
+    plan_certificate
+    plan_dns_records
+    plan_validation_records
+    plan_s3_bucket
+
+    echo -e "${BOLD}${RED}This will permanently delete every resource shown above.${NC}"
+    echo -e "${BOLD}Anything not in the status file will be left untouched.${NC}"
+    echo
+
     if [ "$YES_FLAG" = true ]; then
+        log "INFO" "--yes given; proceeding without prompt"
         return 0
     fi
-    
-    read -p "$message [y/N] " response
-    case "$response" in
-        [yY][eE][sS]|[yY]) 
-            return 0
-            ;;
-        *)
-            return 1
-            ;;
-    esac
+
+    echo -ne "${YELLOW}Type ${BOLD}yes${NC}${YELLOW} to proceed (anything else aborts): ${NC}"
+    read -r response
+    if [ "$response" = "yes" ]; then
+        return 0
+    fi
+    log "INFO" "Cleanup cancelled"
+    exit 0
 }
 
 # Delete CloudFront distribution
@@ -256,24 +461,26 @@ delete_certificate() {
     fi
     
     local cert_arn=$(get_status "certificate_arn")
-    local region=$(get_status "region")
-    
+
+    # Certificate lives in us-east-1 for CloudFront, regardless of deploy --region
+    local cert_region="us-east-1"
+
     if [ -z "$cert_arn" ]; then
         log "WARN" "No certificate ARN found in status file. Skipping..."
         return 0
     fi
-    
+
     # Check if certificate exists
-    if ! $aws_cmd acm describe-certificate --certificate-arn "$cert_arn" --region "$region" &>/dev/null; then
+    if ! $aws_cmd acm describe-certificate --certificate-arn "$cert_arn" --region "$cert_region" &>/dev/null; then
         log "WARN" "Certificate $cert_arn not found. Skipping..."
         return 0
     fi
-    
+
     log "INFO" "Deleting certificate $cert_arn..."
-    
+
     $aws_cmd acm delete-certificate \
         --certificate-arn "$cert_arn" \
-        --region "$region"
+        --region "$cert_region"
     
     log "INFO" "Certificate $cert_arn deleted successfully."
 }
@@ -361,26 +568,26 @@ delete_s3_bucket() {
     fi
     
     local bucket_name=$(get_status "s3_bucket_name")
-    
+
     if [ -z "$bucket_name" ]; then
         log "WARN" "No S3 bucket name found in status file. Skipping..."
         return 0
     fi
-    
-    # Check if bucket exists
-    if ! $aws_cmd s3api head-bucket --bucket "$bucket_name" 2>/dev/null; then
-        log "WARN" "S3 bucket $bucket_name not found. Skipping..."
+
+    log "INFO" "Verifying bucket ownership: $bucket_name belongs to account $ACCOUNT_ID"
+    if ! $aws_cmd s3api head-bucket --bucket "$bucket_name" --expected-bucket-owner "$ACCOUNT_ID" &>/dev/null; then
+        log "WARN" "Bucket $bucket_name is not owned by account $ACCOUNT_ID (or does not exist). Refusing to touch it."
         return 0
     fi
-    
+
     log "INFO" "Removing website configuration from bucket $bucket_name..."
-    $aws_cmd s3api delete-bucket-website --bucket "$bucket_name"
-    
+    $aws_cmd s3api delete-bucket-website --bucket "$bucket_name" --expected-bucket-owner "$ACCOUNT_ID"
+
     log "INFO" "Emptying bucket $bucket_name..."
     $aws_cmd s3 rm "s3://$bucket_name" --recursive
-    
+
     log "INFO" "Deleting bucket $bucket_name..."
-    $aws_cmd s3api delete-bucket --bucket "$bucket_name"
+    $aws_cmd s3api delete-bucket --bucket "$bucket_name" --expected-bucket-owner "$ACCOUNT_ID"
     
     log "INFO" "S3 bucket $bucket_name deleted successfully."
 }
@@ -537,22 +744,19 @@ main() {
     
     # Check AWS configuration
     check_aws_config
-    
-    # Check if cleanup was already completed
+
+    # Resolve and verify the AWS account that should own these resources.
+    # NOTE: must not use $(...) here — resolve_account_id may exit on mismatch.
+    resolve_account_id
+    log "INFO" "Operating against AWS account: $ACCOUNT_ID"
+
     if [ "$(jq -r '.cleanup_completed // "false"' "$STATUS_FILE")" = "true" ]; then
-        log "WARN" "Cleanup was already completed on $(jq -r '.cleanup_timestamp // "unknown"' "$STATUS_FILE")"
-        if ! confirm_action "Do you want to run the cleanup again?"; then
-            log "INFO" "Cleanup cancelled by user."
-            exit 0
-        fi
+        log "WARN" "Status file says cleanup was completed on $(jq -r '.cleanup_timestamp // "unknown"' "$STATUS_FILE"). Re-querying AWS anyway."
     fi
-    
-    # Confirm cleanup
-    if ! confirm_action "This will remove all AWS resources created for domain redirection. Continue?"; then
-        log "INFO" "Cleanup cancelled by user."
-        exit 0
-    fi
-    
+
+    # Print live plan and demand typed-yes confirmation (or --yes)
+    print_plan_and_confirm
+
     # Execute cleanup steps in correct order
     delete_cloudfront_distribution
     delete_certificate
