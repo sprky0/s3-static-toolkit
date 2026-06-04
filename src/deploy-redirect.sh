@@ -16,7 +16,10 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 REGION="us-east-1"
 PROFILE=""
 YES_FLAG=false
-STATUS_FILE="$HOME/.aws-redirect-status.json"
+# Empty by default; init_status_file derives a per-target-domain path unless
+# --status-file overrides it. A single shared file caused state from one
+# deployment to leak into another (see .deploy-status-redirect-<target>.json).
+STATUS_FILE=""
 
 # Display usage information
 usage() {
@@ -28,6 +31,7 @@ usage() {
     echo "  --profile PROFILE            AWS CLI profile (optional)"
     echo "  --region REGION              AWS region (default: us-east-1)"
     echo "  --status-file FILE           Custom path for status tracking file"
+    echo "                               (default: ./.deploy-status-redirect-<target-domain>.json)"
     echo "  --yes                        Skip confirmation prompts"
     echo "  --help                       Display this help message"
     echo
@@ -97,6 +101,14 @@ check_aws_config() {
 
 # Initialize or load status file
 init_status_file() {
+    # Derive a per-deployment status file unless one was given with --status-file.
+    # Keyed on the target domain (one redirect deployment == one target) and
+    # namespaced with "redirect-" so it never collides with deploy-site.sh's
+    # .deploy-status-<domain>.json files for the same domain.
+    if [ -z "$STATUS_FILE" ]; then
+        STATUS_FILE=".deploy-status-redirect-${TARGET_DOMAIN}.json"
+    fi
+
     log "INFO" "Initializing status file at $STATUS_FILE..."
     
     if [ ! -f "$STATUS_FILE" ]; then

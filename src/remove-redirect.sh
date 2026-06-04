@@ -64,7 +64,7 @@ usage() {
     echo "  --help                       Display this help message"
     echo
     echo "Example:"
-    echo "  $0 --status-file ~/.aws-redirect-status.json"
+    echo "  $0 --status-file ./.deploy-status-redirect-example.com.json"
     exit "$exit_code"
 }
 
