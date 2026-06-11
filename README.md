@@ -8,10 +8,20 @@
 This needs a lot more testing on an empty account or super limited IAM credential set.
 It will be done soon, haven't had the time to test it properly yet.
 
-Getting closer
+## Getting Closer
 
-@todo standardize output style of help messages and instructions etc
+### TODOs
 
+- todo standardize output style of help messages and instructions etc
+- fix routing for 'website hosting' mode and defaults for CF->S3
+    - consider a CF function to do rewrites rather than Website mode
+    - in that case we can go back to an OAC rule and limit access to CF / actual domain only
+    - downside is -- may not serve index.html via subdirs unless referenced, eg:
+        - /gallery = /gallery.html
+        - /gallery (meaning directory) will not default to /gallery/index.html
+        - / = /index.html via CF default root object
+- check cache file status - is info stored properly?
+- consider /public as real docroot, allowing for private assets in parallel - can we do this w/ S3 as origin and not 'custom origin' ?
 
 
 
