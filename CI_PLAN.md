@@ -7,13 +7,19 @@ Push-to-deploy pipeline for a static docroot. Three environments —
 CloudFront distribution, selected automatically by branch. Auth is via
 GitHub OIDC, no long-lived AWS keys stored anywhere.
 
-Branch → environment mapping (adjust branch names to taste):
+Branch → environment mapping — branch name and environment name are
+always identical (decided; no `main` exception):
 
 | Branch        | Environment   |
 | ------------- | ------------- |
 | `integration` | integration   |
 | `stage`       | stage         |
-| `main`        | production    |
+| `production`  | production    |
+
+> **Status: implemented** by `src/setup-ci.sh` (provisioning + workflow
+> generation, with a sha256 tamper check on the generated workflow) and
+> `src/remove-ci.sh` (teardown). See the README's "CI: Push-to-Deploy via
+> GitHub Actions" section for usage.
 
 ## Why GitHub Environments, not just branch conditionals
 
@@ -137,9 +143,14 @@ enabled on each bucket before this goes live, so a bad deploy can be
 recovered by restoring previous object versions rather than needing a
 git revert + redeploy cycle.
 
-## Open questions
+## Resolved questions
 
-- Exact branch names, if `integration`/`stage`/`main` aren't final.
-- Whether `production` should require manual approval before running.
-- Whether integration/stage should auto-deploy on every push or only
-  on manual dispatch.
+- Branch names: always identical to the environment name, including
+  `production` (no `main` exception).
+- `production` requires manual approval by default — setup adds the
+  invoking GitHub user as a required reviewer; skip with `--no-approval`.
+- All environments auto-deploy on push to their branch;
+  `workflow_dispatch` with an environment picker exists as a fallback.
+- The generated `deploy.yml` is deterministic and its sha256 is recorded
+  in the CI status file (`config/.ci-status-<org>-<repo>.json`), so
+  `setup-ci.sh --check` detects out-of-band edits in the site repo.
