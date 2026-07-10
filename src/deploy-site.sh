@@ -8,44 +8,8 @@
 
 set -e
 
-# Color definitions
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-BLUE='\033[0;34m'
-MAGENTA='\033[0;35m'
-CYAN='\033[0;36m'
-BOLD='\033[1m'
-NC='\033[0m' # No Color
-
-# Function to log messages with timestamp
-log() {
-    local level=$1
-    local message=$2
-    local timestamp=$(date "+%Y-%m-%d %H:%M:%S")
-    
-    case $level in
-        "INFO") 
-            echo -e "${BLUE}[INFO]${NC} ${timestamp} - ${message}"
-            ;;
-        "SUCCESS") 
-            echo -e "${GREEN}[SUCCESS]${NC} ${timestamp} - ${message}"
-            ;;
-        "WARN") 
-            echo -e "${YELLOW}[WARNING]${NC} ${timestamp} - ${message}"
-            ;;
-        "ERROR") 
-            echo -e "${RED}[ERROR]${NC} ${timestamp} - ${message}"
-            ;;
-        "STEP") 
-            echo -e "\n${MAGENTA}[STEP]${NC} ${timestamp} - ${BOLD}${message}${NC}"
-            ;;
-        "DEBUG")
-            echo -e "${CYAN}[DEBUG]${NC} ${timestamp} - ${message}"
-            ;;
-    esac
-}
-
+# shellcheck disable=SC1091
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 
 # Default values
 AWS_REGION="us-east-1"
@@ -53,6 +17,10 @@ AWS_PROFILE=""
 DOMAIN=""
 STATUS_FILE=""
 AUTO_APPROVE=false
+CREATE_SCOPED_USER=false
+CLEAN_URLS=false
+BASIC_AUTH_CSV=""
+BASIC_AUTH_COOKIE="__s3st_auth"
 TIMEOUT_RETRIES=5
 CERTIFICATE_WAIT_SECONDS=120
 CERTIFICATE_WAIT_INTERVAL=10
@@ -62,12 +30,25 @@ usage() {
     local exit_code="${1:-1}"
     echo -e "${BOLD}Usage:${NC} $0 --domain yourdomain.com [options]"
     echo -e "${BOLD}Options:${NC}"
-    echo "  --domain DOMAIN     Domain name (required)"
-    echo "  --profile PROFILE   AWS CLI profile (optional)"
-    echo "  --region REGION     AWS region (default: us-east-1)"
-    echo "  --yes               Skip all confirmation prompts"
-    echo "  --status-file FILE  Custom status file path"
-    echo "  --help              Display this help message"
+    echo "  --domain DOMAIN          Domain name (required)"
+    echo "  --profile PROFILE        AWS CLI profile (optional)"
+    echo "  --region REGION          AWS region (default: us-east-1)"
+    echo "  --yes                    Skip all confirmation prompts"
+    echo "  --status-file FILE       Custom status file path"
+    echo "  --create-scoped-user     Also create an IAM user scoped to this site's"
+    echo "                           bucket + distribution (read/write/delete on S3,"
+    echo "                           CreateInvalidation on CloudFront only). Access"
+    echo "                           key is printed once and NOT saved to the status"
+    echo "                           file."
+    echo "  --clean-urls             Rewrite extension-less paths at the edge via a"
+    echo "                           CloudFront Function: /about serves /about.html,"
+    echo "                           /docs/ serves /docs/index.html. Off by default."
+    echo "  --basic-auth CSV         Comma-separated user:password pairs. Protects the"
+    echo "                           distribution with HTTP Basic auth via a CloudFront"
+    echo "                           Function; a successful login is remembered in a"
+    echo "                           cookie. Credentials live only in the edge function,"
+    echo "                           never in the status file. Off by default."
+    echo "  --help                   Display this help message"
     exit "$exit_code"
 }
 
@@ -91,6 +72,71 @@ check_prerequisites() {
     fi
     
     log "SUCCESS" "All required tools are installed"
+}
+
+# Function to validate the --basic-auth CSV. Runs before anything else so a
+# malformed credential list never leaves half-provisioned resources behind.
+# Error messages reference entries by position to avoid echoing passwords.
+validate_basic_auth_csv() {
+    if [ -z "$BASIC_AUTH_CSV" ]; then
+        return 0
+    fi
+
+    log "STEP" "Validating --basic-auth credentials"
+
+    local pairs
+    IFS=',' read -ra pairs <<< "$BASIC_AUTH_CSV"
+
+    if [ ${#pairs[@]} -eq 0 ]; then
+        log "ERROR" "--basic-auth: no user:password pairs found"
+        exit 1
+    fi
+
+    local seen_users=" "
+    local i=0
+    local pair user pass
+    for pair in "${pairs[@]}"; do
+        i=$((i + 1))
+        if [ -z "$pair" ]; then
+            log "ERROR" "--basic-auth: entry $i is empty (check for stray commas)"
+            exit 1
+        fi
+        case "$pair" in
+            *:*) ;;
+            *)
+                log "ERROR" "--basic-auth: entry $i is not in user:password form"
+                exit 1
+                ;;
+        esac
+        user="${pair%%:*}"
+        pass="${pair#*:}"
+        if [ -z "$user" ]; then
+            log "ERROR" "--basic-auth: entry $i has an empty username"
+            exit 1
+        fi
+        if [ -z "$pass" ]; then
+            log "ERROR" "--basic-auth: entry $i (user '$user') has an empty password"
+            exit 1
+        fi
+        if ! [[ "$user" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            log "ERROR" "--basic-auth: entry $i has an invalid username (allowed: letters, digits, '.', '_', '-')"
+            exit 1
+        fi
+        if [[ "$pass" =~ [^[:print:]] ]]; then
+            log "ERROR" "--basic-auth: entry $i (user '$user') has a password with non-printable characters"
+            exit 1
+        fi
+        case "$seen_users" in
+            *" $user "*)
+                log "ERROR" "--basic-auth: duplicate username '$user' (entry $i)"
+                exit 1
+                ;;
+        esac
+        seen_users="${seen_users}${user} "
+    done
+
+    log "SUCCESS" "--basic-auth: validated ${#pairs[@]} user:password pair(s)"
+    return 0
 }
 
 # Function to check AWS CLI configuration
@@ -202,27 +248,33 @@ confirm_action() {
 check_hosted_zone() {
     if is_step_completed "hosted_zone"; then
         local zone_id=$(get_status "zone_id" "")
-        log "INFO" "Hosted zone already verified (Zone ID: $zone_id)"
+        local zone_name=$(get_status "zone_name" "")
+        log "INFO" "Hosted zone already verified (Zone ID: $zone_id${zone_name:+, Zone: $zone_name})"
         return 0
     fi
-    
+
     log "STEP" "Checking Route53 hosted zone for $DOMAIN"
-    
-    local aws_cmd="aws"
-    if [ -n "$AWS_PROFILE" ]; then
-        aws_cmd="$aws_cmd --profile $AWS_PROFILE"
-    fi
-    
-    local zone_id=$($aws_cmd route53 list-hosted-zones --query "HostedZones[?Name=='$DOMAIN.' || Name=='$DOMAIN'].Id" --output text | sed 's/\/hostedzone\///')
-    
-    if [ -z "$zone_id" ]; then
-        log "ERROR" "No Route53 hosted zone found for $DOMAIN"
-        log "INFO" "Please create a hosted zone for $DOMAIN in Route53 and try again."
+
+    local match
+    match=$(find_zone_for_domain "$DOMAIN" "$AWS_PROFILE")
+
+    if [ -z "$match" ]; then
+        log "ERROR" "No Route53 hosted zone found for $DOMAIN or any parent domain"
+        log "INFO" "Please create a hosted zone covering $DOMAIN in Route53 and try again."
         exit 1
     fi
-    
-    log "SUCCESS" "Found Route53 hosted zone for $DOMAIN (Zone ID: $zone_id)"
+
+    local zone_id="${match%%|*}"
+    local zone_name="${match#*|}"
+
+    if [ "$zone_name" = "$DOMAIN" ]; then
+        log "SUCCESS" "Found Route53 hosted zone for $DOMAIN (Zone ID: $zone_id)"
+    else
+        log "SUCCESS" "Found parent Route53 hosted zone $zone_name covering $DOMAIN (Zone ID: $zone_id)"
+    fi
+
     update_status "zone_id" "$zone_id"
+    update_status "zone_name" "$zone_name"
     mark_step_completed "hosted_zone"
     return 0
 }
@@ -402,50 +454,6 @@ create_certificate() {
     return 0
 }
 
-# # Function to create CloudFront OAC
-# create_oac() {
-#     if is_step_completed "oac"; then
-#         local oac_id=$(get_status "oac_id" "")
-#         log "INFO" "Origin Access Control already created (ID: $oac_id)"
-#         return 0
-#     fi
-    
-#     log "STEP" "Creating CloudFront Origin Access Control"
-    
-#     local aws_cmd="aws"
-#     if [ -n "$AWS_PROFILE" ]; then
-#         aws_cmd="$aws_cmd --profile $AWS_PROFILE"
-#     fi
-    
-#     # Create OAC
-#     local oac_name="${DOMAIN}-oac"
-#     local oac_config=$(cat <<EOF
-# {
-#     "Name": "$oac_name",
-#     "Description": "OAC for $DOMAIN",
-#     "SigningProtocol": "sigv4",
-#     "SigningBehavior": "always",
-#     "OriginAccessControlOriginType": "s3"
-# }
-# EOF
-# )
-    
-#     local oac_result=$($aws_cmd cloudfront create-origin-access-control \
-#         --origin-access-control-config "$oac_config" \
-#         --output json)
-    
-#     if [ $? -ne 0 ]; then
-#         log "ERROR" "Failed to create Origin Access Control"
-#         exit 1
-#     fi
-    
-#     local oac_id=$(echo "$oac_result" | jq -r '.OriginAccessControl.Id')
-    
-#     log "SUCCESS" "Origin Access Control created successfully (ID: $oac_id)"
-#     update_status "oac_id" "$oac_id"
-#     mark_step_completed "oac"
-#     return 0
-# }
 
 # Function to create CloudFront OAC
 create_oac() {
@@ -541,162 +549,185 @@ EOF
 }
 
 
+# Emit the JavaScript for the viewer-request CloudFront Function to stdout.
+# CloudFront allows a single function per event type, so both optional
+# behaviors (basic auth, clean URLs) are compiled into one handler containing
+# only the blocks that were requested. Auth flow: a valid session cookie
+# passes immediately; otherwise valid Basic credentials trigger a 302 back to
+# the same URI that sets the cookie (checking the cookie FIRST is what
+# prevents a redirect loop, since browsers keep resending Authorization);
+# anything else gets a 401 challenge.
+build_viewer_request_code() {
+    echo "function handler(event) {"
+    echo "    var request = event.request;"
 
-# # Function to create CloudFront distribution
-# create_cloudfront_distribution() {
-#     if is_step_completed "cloudfront"; then
-#         local distribution_id=$(get_status "distribution_id" "")
-#         local distribution_domain=$(get_status "distribution_domain" "")
-#         log "INFO" "CloudFront distribution already created (ID: $distribution_id, Domain: $distribution_domain)"
-#         return 0
-#     fi
-    
-#     log "STEP" "Creating CloudFront distribution for $DOMAIN"
-    
-#     # Check if certificate is validated
-#     if ! is_step_completed "certificate"; then
-#         log "WARN" "Certificate is not yet validated. Please run the script again later."
-#         return 1
-#     fi
-    
-#     local aws_cmd="aws"
-#     if [ -n "$AWS_PROFILE" ]; then
-#         aws_cmd="$aws_cmd --profile $AWS_PROFILE"
-#     fi
-    
-#     local bucket_name=$(get_status "bucket_name" "")
-#     local cert_arn=$(get_status "certificate_arn" "")
-#     local oac_id=$(get_status "oac_id" "")
-    
-#     # Prepare distribution config
-#     local dist_config_file=$(mktemp)
-#     cat > "$dist_config_file" <<EOF
-# {
-#     "CallerReference": "${DOMAIN}-$(date +%s)",
-#     "Aliases": {
-#         "Quantity": 2,
-#         "Items": [
-#             "${DOMAIN}"
-#         ]
-#     },
-#     "DefaultRootObject": "index.html",
-#     "Origins": {
-#         "Quantity": 1,
-#         "Items": [
-#             {
-#                 "Id": "S3-${bucket_name}",
-#                 "DomainName": "${bucket_name}.s3.${AWS_REGION}.amazonaws.com",
-#                 "OriginPath": "",
-#                 "CustomHeaders": {
-#                     "Quantity": 0
-#                 },
-#                 "S3OriginConfig": {
-#                     "OriginAccessIdentity": ""
-#                 },
-#                 "OriginAccessControlId": "${oac_id}"
-#             }
-#         ]
-#     },
-#     "OriginGroups": {
-#         "Quantity": 0
-#     },
-#     "DefaultCacheBehavior": {
-#         "TargetOriginId": "S3-${bucket_name}",
-#         "ViewerProtocolPolicy": "redirect-to-https",
-#         "AllowedMethods": {
-#             "Quantity": 2,
-#             "Items": [
-#                 "GET",
-#                 "HEAD"
-#             ],
-#             "CachedMethods": {
-#                 "Quantity": 2,
-#                 "Items": [
-#                     "GET",
-#                     "HEAD"
-#                 ]
-#             }
-#         },
-#         "SmoothStreaming": false,
-#         "Compress": true,
-#         "LambdaFunctionAssociations": {
-#             "Quantity": 0
-#         },
-#         "FieldLevelEncryptionId": "",
-#         "CachePolicyId": "658327ea-f89d-4fab-a63d-7e88639e58f6",
-#         "OriginRequestPolicyId": "88a5eaf4-2fd4-4709-b370-b4c650ea3fcf"
-#     },
-#     "CacheBehaviors": {
-#         "Quantity": 0
-#     },
-#     "CustomErrorResponses": {
-#         "Quantity": 1,
-#         "Items": [
-#             {
-#                 "ErrorCode": 404,
-#                 "ResponsePagePath": "/error.html",
-#                 "ResponseCode": "404",
-#                 "ErrorCachingMinTTL": 10
-#             }
-#         ]
-#     },
-#     "Comment": "Distribution for ${DOMAIN}",
-#     "Logging": {
-#         "Enabled": false,
-#         "IncludeCookies": false,
-#         "Bucket": "",
-#         "Prefix": ""
-#     },
-#     "PriceClass": "PriceClass_100",
-#     "Enabled": true,
-#     "ViewerCertificate": {
-#         "ACMCertificateArn": "${cert_arn}",
-#         "SSLSupportMethod": "sni-only",
-#         "MinimumProtocolVersion": "TLSv1.2_2021",
-#         "Certificate": "${cert_arn}",
-#         "CertificateSource": "acm"
-#     },
-#     "Restrictions": {
-#         "GeoRestriction": {
-#             "RestrictionType": "none",
-#             "Quantity": 0
-#         }
-#     },
-#     "WebACLId": "",
-#     "HttpVersion": "http2",
-#     "IsIPV6Enabled": true
-# }
-# EOF
-    
-#     # Create distribution
-#     log "INFO" "Creating CloudFront distribution (this may take a minute)..."
-#     local dist_result=$($aws_cmd cloudfront create-distribution \
-#         --distribution-config "file://${dist_config_file}" \
-#         --output json)
-    
-#     rm -f "$dist_config_file"
-    
-#     if [ $? -ne 0 ]; then
-#         log "ERROR" "Failed to create CloudFront distribution"
-#         exit 1
-#     fi
-    
-#     local distribution_id=$(echo "$dist_result" | jq -r '.Distribution.Id')
-#     local distribution_domain=$(echo "$dist_result" | jq -r '.Distribution.DomainName')
-    
-#     log "SUCCESS" "CloudFront distribution created successfully"
-#     log "INFO" "Distribution ID: $distribution_id"
-#     log "INFO" "Distribution Domain: $distribution_domain"
-    
-#     update_status "distribution_id" "$distribution_id"
-#     update_status "distribution_domain" "$distribution_domain"
-#     mark_step_completed "cloudfront"
-    
-#     # Update S3 bucket policy
-#     update_bucket_policy
-    
-#     return 0
-# }
+    if [ -n "$BASIC_AUTH_CSV" ]; then
+        local tokens_js=""
+        local valid_js=""
+        local pairs pair cred_b64 token
+        IFS=',' read -ra pairs <<< "$BASIC_AUTH_CSV"
+        for pair in "${pairs[@]}"; do
+            cred_b64=$(printf '%s' "$pair" | base64)
+            token=$(openssl rand -hex 32)
+            tokens_js="${tokens_js}        '${cred_b64}': '${token}',"$'\n'
+            valid_js="${valid_js}        '${token}': true,"$'\n'
+        done
+
+        cat <<EOF
+    var TOKENS = {
+${tokens_js}    };
+    var VALID = {
+${valid_js}    };
+    var authed = false;
+    if (request.cookies['${BASIC_AUTH_COOKIE}'] && VALID[request.cookies['${BASIC_AUTH_COOKIE}'].value]) {
+        authed = true;
+    }
+    if (!authed) {
+        var token = '';
+        if (request.headers.authorization) {
+            var auth = request.headers.authorization.value;
+            if (auth.substring(0, 6) === 'Basic ') {
+                token = TOKENS[auth.substring(6)] || '';
+            }
+        }
+        if (!token) {
+            return {
+                statusCode: 401,
+                statusDescription: 'Unauthorized',
+                headers: {
+                    'www-authenticate': { value: 'Basic realm="Restricted"' }
+                }
+            };
+        }
+        var location = request.uri;
+        var qs = [];
+        for (var key in request.querystring) {
+            qs.push(key + '=' + request.querystring[key].value);
+        }
+        if (qs.length > 0) {
+            location = location + '?' + qs.join('&');
+        }
+        return {
+            statusCode: 302,
+            statusDescription: 'Found',
+            headers: {
+                'location': { value: location }
+            },
+            cookies: {
+                '${BASIC_AUTH_COOKIE}': {
+                    value: token,
+                    attributes: 'Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=86400'
+                }
+            }
+        };
+    }
+EOF
+    fi
+
+    if [ "$CLEAN_URLS" = true ]; then
+        cat <<'EOF'
+    var uri = request.uri;
+    if (uri.charAt(uri.length - 1) === '/') {
+        request.uri = uri + 'index.html';
+    } else if (uri.substring(uri.lastIndexOf('/') + 1).indexOf('.') === -1) {
+        request.uri = uri + '.html';
+    }
+EOF
+    fi
+
+    echo "    return request;"
+    echo "}"
+}
+
+# Function to create/update and publish the viewer-request CloudFront Function.
+# No-op unless --clean-urls and/or --basic-auth was requested.
+create_viewer_request_function() {
+    if [ "$CLEAN_URLS" != true ] && [ -z "$BASIC_AUTH_CSV" ]; then
+        return 0
+    fi
+
+    if is_step_completed "cf_function"; then
+        local existing_arn=$(get_status "function_arn" "")
+        if [ -n "$existing_arn" ]; then
+            log "INFO" "CloudFront function already created (ARN: $existing_arn)"
+            return 0
+        fi
+        log "WARN" "CloudFront function marked as completed but ARN is empty, will attempt to (re)create"
+        update_status "cf_function_completed" "false"
+    fi
+
+    log "STEP" "Creating CloudFront viewer-request function for $DOMAIN"
+
+    local aws_cmd="aws"
+    if [ -n "$AWS_PROFILE" ]; then
+        aws_cmd="$aws_cmd --profile $AWS_PROFILE"
+    fi
+
+    # Function names only allow [a-zA-Z0-9-_]
+    local fn_name="$(echo "$DOMAIN" | tr '.' '-')-viewer-request"
+    local fn_config="Comment=Viewer-request function for ${DOMAIN},Runtime=cloudfront-js-2.0"
+
+    local code_file=$(mktemp)
+    build_viewer_request_code > "$code_file"
+
+    # Create or update depending on whether the function already exists
+    local etag fn_result
+    etag=$($aws_cmd cloudfront describe-function --name "$fn_name" --query "ETag" --output text 2>/dev/null) || etag=""
+
+    if [ -n "$etag" ] && [ "$etag" != "None" ]; then
+        log "INFO" "Function $fn_name already exists, updating code"
+        if ! fn_result=$($aws_cmd cloudfront update-function \
+            --name "$fn_name" \
+            --if-match "$etag" \
+            --function-config "$fn_config" \
+            --function-code "fileb://${code_file}" \
+            --output json); then
+            rm -f "$code_file"
+            log "ERROR" "Failed to update CloudFront function $fn_name"
+            return 1
+        fi
+    else
+        log "INFO" "Creating function $fn_name"
+        if ! fn_result=$($aws_cmd cloudfront create-function \
+            --name "$fn_name" \
+            --function-config "$fn_config" \
+            --function-code "fileb://${code_file}" \
+            --output json); then
+            rm -f "$code_file"
+            log "ERROR" "Failed to create CloudFront function $fn_name"
+            return 1
+        fi
+    fi
+    rm -f "$code_file"
+
+    local fn_arn=$(echo "$fn_result" | jq -r '.FunctionSummary.FunctionMetadata.FunctionARN')
+    etag=$(echo "$fn_result" | jq -r '.ETag')
+
+    if [ -z "$fn_arn" ] || [ "$fn_arn" = "null" ]; then
+        log "ERROR" "Failed to extract function ARN from result"
+        return 1
+    fi
+
+    # Publish to LIVE — the distribution can only associate a published function
+    log "INFO" "Publishing function $fn_name"
+    if ! $aws_cmd cloudfront publish-function --name "$fn_name" --if-match "$etag" >/dev/null; then
+        log "ERROR" "Failed to publish CloudFront function $fn_name"
+        return 1
+    fi
+
+    log "SUCCESS" "CloudFront function created and published (ARN: $fn_arn)"
+    update_status "function_name" "$fn_name"
+    update_status "function_arn" "$fn_arn"
+    update_status "clean_urls" "$CLEAN_URLS"
+    if [ -n "$BASIC_AUTH_CSV" ]; then
+        # Usernames only — passwords are never persisted
+        local users=$(echo "$BASIC_AUTH_CSV" | tr ',' '\n' | cut -d: -f1 | paste -sd' ' -)
+        update_status "basic_auth_users" "$users"
+    fi
+    mark_step_completed "cf_function"
+    return 0
+}
+
 
 # Function to create CloudFront distribution
 create_cloudfront_distribution() {
@@ -754,6 +785,10 @@ create_cloudfront_distribution() {
             local existing_dist_domain=$(echo "$distributions" | jq -r --arg id "$existing_dist_id" '.DistributionList.Items[] | select(.Id == $id) | .DomainName' 2>/dev/null)
             
             log "INFO" "Found existing distribution for $DOMAIN (ID: $existing_dist_id, Domain: $existing_dist_domain)"
+            if [ -n "$(get_status "function_arn" "")" ]; then
+                log "WARN" "Reusing an existing distribution: the viewer-request function was NOT attached to it."
+                log "WARN" "Associate $(get_status "function_name" "") manually if --clean-urls/--basic-auth should apply."
+            fi
             update_status "distribution_id" "$existing_dist_id"
             update_status "distribution_domain" "$existing_dist_domain"
             mark_step_completed "cloudfront"
@@ -765,6 +800,26 @@ create_cloudfront_distribution() {
         fi
     fi
     
+    # Attach the viewer-request function if one was provisioned
+    local fn_arn=$(get_status "function_arn" "")
+    local function_associations
+    if [ -n "$fn_arn" ]; then
+        function_associations=$(cat <<EOF
+{
+            "Quantity": 1,
+            "Items": [
+                {
+                    "FunctionARN": "${fn_arn}",
+                    "EventType": "viewer-request"
+                }
+            ]
+        }
+EOF
+)
+    else
+        function_associations='{ "Quantity": 0 }'
+    fi
+
     # Prepare distribution config
     local dist_config_file=$(mktemp)
     cat > "$dist_config_file" <<EOF
@@ -820,6 +875,7 @@ create_cloudfront_distribution() {
             "Quantity": 0
         },
         "FieldLevelEncryptionId": "",
+        "FunctionAssociations": ${function_associations},
         "CachePolicyId": "658327ea-f89d-4fab-a63d-7e88639e58f6",
         "OriginRequestPolicyId": "88a5eaf4-2fd4-4709-b370-b4c650ea3fcf"
     },
@@ -955,56 +1011,6 @@ EOF
 }
 
 # Function to create Route53 DNS records
-# create_dns_records() {
-#     if is_step_completed "dns"; then
-#         log "INFO" "DNS records already created"
-#         return 0
-#     fi
-    
-#     log "STEP" "Creating Route53 DNS records for $DOMAIN"
-    
-#     local aws_cmd="aws"
-#     if [ -n "$AWS_PROFILE" ]; then
-#         aws_cmd="$aws_cmd --profile $AWS_PROFILE"
-#     fi
-    
-#     local zone_id=$(get_status "zone_id" "")
-#     local distribution_domain=$(get_status "distribution_domain" "")
-    
-#     # Create A record aliases for domain and www subdomain
-#     local change_batch=$(cat <<EOF
-# {
-#     "Changes": [
-#         {
-#             "Action": "UPSERT",
-#             "ResourceRecordSet": {
-#                 "Name": "${DOMAIN}.",
-#                 "Type": "A",
-#                 "AliasTarget": {
-#                     "HostedZoneId": "Z2FDTNDATAQYW2",
-#                     "DNSName": "${distribution_domain}",
-#                     "EvaluateTargetHealth": false
-#                 }
-#             }
-#         }
-#     ]
-# }
-# EOF
-# )
-    
-#     $aws_cmd route53 change-resource-record-sets \
-#         --hosted-zone-id "$zone_id" \
-#         --change-batch "$change_batch"
-    
-#     if [ $? -ne 0 ]; then
-#         log "ERROR" "Failed to create DNS records"
-#         return 1
-#     fi
-    
-#     log "SUCCESS" "DNS records created successfully"
-#     mark_step_completed "dns"
-#     return 0
-# }
 
 create_dns_records() {
     if is_step_completed "dns"; then
@@ -1282,7 +1288,24 @@ verify_deployment() {
     
     # Try to access the website
     log "INFO" "Checking website accessibility..."
-    local http_code=$(curl -s -o /dev/null -w "%{http_code}" "https://$DOMAIN")
+    local http_code
+    if [ -n "$BASIC_AUTH_CSV" ]; then
+        # With basic auth enabled, an anonymous request must be challenged...
+        local unauth_code=$(curl -s -o /dev/null -w "%{http_code}" "https://$DOMAIN")
+        if [ "$unauth_code" = "401" ]; then
+            log "SUCCESS" "Unauthenticated request correctly challenged (HTTP 401)"
+        else
+            log "WARN" "Expected HTTP 401 without credentials, got HTTP $unauth_code"
+        fi
+        # ...and the first credential pair must get through (302 sets the
+        # session cookie, -L -b/-c follows with it).
+        local first_pair="${BASIC_AUTH_CSV%%,*}"
+        local cookie_jar=$(mktemp)
+        http_code=$(curl -s -o /dev/null -w "%{http_code}" -L -u "$first_pair" -c "$cookie_jar" -b "$cookie_jar" "https://$DOMAIN")
+        rm -f "$cookie_jar"
+    else
+        http_code=$(curl -s -o /dev/null -w "%{http_code}" "https://$DOMAIN")
+    fi
     
     if [ "$http_code" = "200" ]; then
         log "SUCCESS" "Website is accessible (HTTP 200)"
@@ -1292,6 +1315,161 @@ verify_deployment() {
         log "INFO" "DNS propagation may take more time"
     fi
     
+    return 0
+}
+
+# Function to optionally create a scoped IAM user for site administration.
+# The user gets an inline policy permitting object-level S3 access on the
+# provisioned bucket and CreateInvalidation on the provisioned distribution
+# only. The access key secret is printed ONCE and is NEVER written to the
+# status file.
+create_scoped_user() {
+    if [ "$CREATE_SCOPED_USER" != true ]; then
+        return 0
+    fi
+
+    if is_step_completed "scoped_user"; then
+        local existing_user=$(get_status "scoped_user_name" "")
+        log "INFO" "Scoped IAM user already provisioned (User: $existing_user)"
+        log "INFO" "If the secret was lost, delete the user via remove-site.sh and re-run."
+        return 0
+    fi
+
+    log "STEP" "Creating scoped IAM user for $DOMAIN"
+
+    local aws_cmd="aws"
+    if [ -n "$AWS_PROFILE" ]; then
+        aws_cmd="$aws_cmd --profile $AWS_PROFILE"
+    fi
+
+    local bucket_name=$(get_status "bucket_name" "")
+    local distribution_id=$(get_status "distribution_id" "")
+    local account_id=$(get_status "account_id" "")
+
+    if [ -z "$bucket_name" ] || [ -z "$distribution_id" ] || [ -z "$account_id" ]; then
+        log "ERROR" "Cannot create scoped user before bucket, distribution, and account ID are known"
+        return 1
+    fi
+
+    local user_name="${DOMAIN}-site-admin"
+    local policy_name="${DOMAIN}-site-admin-policy"
+
+    # Create the IAM user (idempotent: ignore EntityAlreadyExists)
+    if $aws_cmd iam get-user --user-name "$user_name" &>/dev/null; then
+        log "INFO" "IAM user $user_name already exists, reusing"
+    else
+        log "INFO" "Creating IAM user $user_name"
+        if ! $aws_cmd iam create-user \
+            --user-name "$user_name" \
+            --tags "Key=ManagedBy,Value=s3-static-toolkit" "Key=Domain,Value=${DOMAIN}" \
+            >/dev/null; then
+            log "ERROR" "Failed to create IAM user $user_name"
+            return 1
+        fi
+    fi
+
+    # Attach the inline scoped policy. put-user-policy is idempotent (overwrites).
+    local policy_file=$(mktemp)
+    cat > "$policy_file" <<EOF
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "S3BucketLevel",
+            "Effect": "Allow",
+            "Action": [
+                "s3:ListBucket",
+                "s3:GetBucketLocation"
+            ],
+            "Resource": "arn:aws:s3:::${bucket_name}"
+        },
+        {
+            "Sid": "S3ObjectLevel",
+            "Effect": "Allow",
+            "Action": [
+                "s3:GetObject",
+                "s3:PutObject",
+                "s3:DeleteObject",
+                "s3:GetObjectTagging",
+                "s3:PutObjectTagging",
+                "s3:DeleteObjectTagging",
+                "s3:GetObjectAcl",
+                "s3:PutObjectAcl"
+            ],
+            "Resource": "arn:aws:s3:::${bucket_name}/*"
+        },
+        {
+            "Sid": "CloudFrontInvalidation",
+            "Effect": "Allow",
+            "Action": [
+                "cloudfront:CreateInvalidation",
+                "cloudfront:GetInvalidation",
+                "cloudfront:ListInvalidations"
+            ],
+            "Resource": "arn:aws:cloudfront::${account_id}:distribution/${distribution_id}"
+        }
+    ]
+}
+EOF
+
+    log "INFO" "Attaching inline policy $policy_name"
+    if ! $aws_cmd iam put-user-policy \
+        --user-name "$user_name" \
+        --policy-name "$policy_name" \
+        --policy-document "file://${policy_file}"; then
+        rm -f "$policy_file"
+        log "ERROR" "Failed to attach inline policy $policy_name"
+        return 1
+    fi
+    rm -f "$policy_file"
+
+    # Only create an access key if the user has none. AWS limits to 2 keys per
+    # user; we don't want to silently consume a slot on a re-run.
+    local existing_keys
+    existing_keys=$($aws_cmd iam list-access-keys --user-name "$user_name" --query 'AccessKeyMetadata[].AccessKeyId' --output text)
+    if [ -n "$existing_keys" ] && [ "$existing_keys" != "None" ]; then
+        log "WARN" "User $user_name already has access keys; skipping key creation."
+        log "INFO" "Existing key IDs: $existing_keys"
+        update_status "scoped_user_name" "$user_name"
+        update_status "scoped_user_policy_name" "$policy_name"
+        mark_step_completed "scoped_user"
+        return 0
+    fi
+
+    log "INFO" "Creating access key for $user_name"
+    local key_result
+    key_result=$($aws_cmd iam create-access-key --user-name "$user_name" --output json)
+    if [ $? -ne 0 ] || [ -z "$key_result" ]; then
+        log "ERROR" "Failed to create access key"
+        return 1
+    fi
+
+    local access_key_id=$(echo "$key_result" | jq -r '.AccessKey.AccessKeyId')
+    local secret_access_key=$(echo "$key_result" | jq -r '.AccessKey.SecretAccessKey')
+
+    update_status "scoped_user_name" "$user_name"
+    update_status "scoped_user_policy_name" "$policy_name"
+    update_status "scoped_user_access_key_id" "$access_key_id"
+    mark_step_completed "scoped_user"
+
+    # Print credentials prominently. This is the only time the secret is shown.
+    echo
+    echo -e "${BOLD}${BG_RED}${WHITE}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${BOLD}${BG_RED}${WHITE}║   SCOPED IAM USER CREDENTIALS — SHOWN ONCE, COPY NOW         ║${NC}"
+    echo -e "${BOLD}${BG_RED}${WHITE}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo
+    echo -e "  ${BOLD}User name:${NC}          $user_name"
+    echo -e "  ${BOLD}Access Key ID:${NC}      $access_key_id"
+    echo -e "  ${BOLD}Secret Access Key:${NC}  $secret_access_key"
+    echo
+    echo -e "${YELLOW}Permissions: read/write/delete objects in s3://${bucket_name},${NC}"
+    echo -e "${YELLOW}             CreateInvalidation on distribution ${distribution_id}.${NC}"
+    echo
+    echo -e "${RED}${BOLD}The secret is NOT stored in the status file and cannot be retrieved.${NC}"
+    echo -e "${RED}${BOLD}If lost, delete the user via remove-site.sh and re-run with --create-scoped-user.${NC}"
+    echo
+
+    log "SUCCESS" "Scoped IAM user $user_name created"
     return 0
 }
 
@@ -1307,6 +1485,19 @@ display_summary() {
     echo -e "${BOLD}CloudFront Distribution:${NC} $(get_status "distribution_id" "N/A")"
     echo -e "${BOLD}Distribution Domain:${NC} $(get_status "distribution_domain" "N/A")"
     echo -e "${BOLD}Status File:${NC} $STATUS_FILE"
+    local fn_name=$(get_status "function_name" "")
+    if [ -n "$fn_name" ]; then
+        echo -e "${BOLD}CloudFront Function:${NC} $fn_name"
+        echo -e "  clean-urls: $(get_status "clean_urls" "false")"
+        local ba_users=$(get_status "basic_auth_users" "")
+        if [ -n "$ba_users" ]; then
+            echo -e "  basic-auth users: $ba_users (session cookie: $BASIC_AUTH_COOKIE)"
+        fi
+    fi
+    local scoped_user=$(get_status "scoped_user_name" "")
+    if [ -n "$scoped_user" ]; then
+        echo -e "${BOLD}Scoped IAM User:${NC} $scoped_user (Access Key: $(get_status "scoped_user_access_key_id" "N/A"))"
+    fi
     echo
     echo -e "${CYAN}╔════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${CYAN}║                      ${BOLD}NEXT STEPS${NC}${CYAN}                            ║${NC}"
@@ -1369,6 +1560,19 @@ main() {
                 shift
                 shift
                 ;;
+            --create-scoped-user)
+                CREATE_SCOPED_USER=true
+                shift
+                ;;
+            --clean-urls)
+                CLEAN_URLS=true
+                shift
+                ;;
+            --basic-auth)
+                BASIC_AUTH_CSV="$2"
+                shift
+                shift
+                ;;
             --help)
                 usage 0
                 ;;
@@ -1384,7 +1588,10 @@ main() {
         log "ERROR" "Domain name is required"
         usage
     fi
-    
+
+    # Validate --basic-auth input before doing anything else
+    validate_basic_auth_csv
+
     # Welcome message
     echo -e "${CYAN}╔════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${CYAN}║            ${BOLD}AWS STATIC SITE DEPLOYMENT SCRIPT${NC}${CYAN}               ║${NC}"
@@ -1417,13 +1624,15 @@ main() {
     create_s3_bucket
     create_certificate
     create_oac
+    create_viewer_request_function
     create_cloudfront_distribution
     create_dns_records
     upload_sample_content
     invalidate_cache
     wait_for_distribution
     verify_deployment
-    
+    create_scoped_user
+
     # Display summary
     display_summary
 }

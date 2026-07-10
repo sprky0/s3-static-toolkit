@@ -2,9 +2,10 @@
 #───────────────────────────────────────────────────────────────────────────────
 # lib/common.sh - Common helpers for s3-static-toolkit scripts
 # Modeled after ~/access/aliases/lib/common.sh
+#
+# NOTE: this file does NOT enable `set -euo pipefail`. Sourcing scripts inherit
+# `set` flags, so we leave error-handling discipline to each caller.
 #───────────────────────────────────────────────────────────────────────────────
-
-set -euo pipefail
 
 # Determine this file's directory (bash/zsh compatible best-effort)
 if [[ -n "${BASH_SOURCE[0]:-}" ]]; then
@@ -36,6 +37,29 @@ log_info() { echo -e "${BLUE}[INFO]${NC} $(date "+%Y-%m-%d %H:%M:%S") - $*"; }
 log_success() { echo -e "${GREEN}[SUCCESS]${NC} $(date "+%Y-%m-%d %H:%M:%S") - $*"; }
 log_warn() { echo -e "${YELLOW}[WARNING]${NC} $(date "+%Y-%m-%d %H:%M:%S") - $*"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $(date "+%Y-%m-%d %H:%M:%S") - $*"; }
+log_step() { echo -e "\n${MAGENTA}[STEP]${NC} $(date "+%Y-%m-%d %H:%M:%S") - ${BOLD}$*${NC}"; }
+log_debug() { echo -e "${CYAN}[DEBUG]${NC} $(date "+%Y-%m-%d %H:%M:%S") - $*"; }
+
+# Two-arg dispatcher used pervasively by the toolkit's scripts:
+#   log "INFO" "message"
+#   log "ERROR" "message"
+log() {
+	local level="$1"; shift
+	case "$level" in
+		INFO)    log_info    "$*" ;;
+		SUCCESS) log_success "$*" ;;
+		WARN)    log_warn    "$*" ;;
+		ERROR)   log_error   "$*" ;;
+		STEP)    log_step    "$*" ;;
+		DEBUG)   log_debug   "$*" ;;
+		*)       echo -e "[${level}] $(date "+%Y-%m-%d %H:%M:%S") - $*" ;;
+	esac
+}
+
+# Render a destructive verb LOUDLY (white-on-red pill). Used in cleanup plans.
+destruct() {
+	echo -ne "${BOLD}${BG_RED}${WHITE} $1 ${NC}"
+}
 
 confirm() {
 	local prompt="$1"
@@ -78,4 +102,36 @@ default_redirect_status_file() {
 	local home_dir
 	home_dir="$(ensure_state_dir)"
 	echo "${home_dir}/redirect-${target_domain}.json"
+}
+
+# find_zone_for_domain DOMAIN [AWS_PROFILE]
+#
+# Walk labels from longest to shortest looking up each suffix as a Route53
+# hosted zone. Returns the longest matching zone — for "blog.foo.example.com"
+# it tries "blog.foo.example.com", "foo.example.com", "example.com" in order
+# and returns the first hit. Correctly handles multi-part TLDs (.co.uk etc).
+#
+# Prints "ZONE_ID|ZONE_NAME" on stdout when a zone is found (zone name without
+# trailing dot). Prints nothing when no zone matches. Always exits 0 — caller
+# decides whether absence is an error.
+find_zone_for_domain() {
+	local domain="$1"
+	local aws_profile="${2:-}"
+	local aws_cmd="aws"
+	[[ -n "$aws_profile" ]] && aws_cmd="aws --profile $aws_profile"
+
+	local candidate="${domain%.}"
+	while [[ "$candidate" == *.* ]]; do
+		local zone_id
+		zone_id=$($aws_cmd route53 list-hosted-zones-by-name \
+			--dns-name "$candidate." --max-items 1 \
+			--query "HostedZones[?Name=='$candidate.'].Id" \
+			--output text 2>/dev/null | head -n1 | sed 's|^/hostedzone/||')
+		if [[ -n "$zone_id" && "$zone_id" != "None" ]]; then
+			echo "${zone_id}|${candidate}"
+			return 0
+		fi
+		candidate="${candidate#*.}"
+	done
+	return 0
 }

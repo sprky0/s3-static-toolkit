@@ -2,50 +2,12 @@
 # =============================================================================
 # AWS CLI login helper script
 #
-# This script confirms that the AWS credentials are set in the environment 
+# This script confirms that the AWS credentials are set in the environment
 # and that the AWS CLI is configured to use them.
 # =============================================================================
 
-
-# Check if required environment variables are set
-
-# Color definitions
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-BLUE='\033[0;34m'
-MAGENTA='\033[0;35m'
-CYAN='\033[0;36m'
-BOLD='\033[1m'
-NC='\033[0m' # No Color
-
-# Function to log messages with timestamp
-log() {
-    local level=$1
-    local message=$2
-    local timestamp=$(date "+%Y-%m-%d %H:%M:%S")
-    
-    case $level in
-        "INFO") 
-            echo -e "${BLUE}[INFO]${NC} ${timestamp} - ${message}"
-            ;;
-        "SUCCESS") 
-            echo -e "${GREEN}[SUCCESS]${NC} ${timestamp} - ${message}"
-            ;;
-        "WARN") 
-            echo -e "${YELLOW}[WARNING]${NC} ${timestamp} - ${message}"
-            ;;
-        "ERROR") 
-            echo -e "${RED}[ERROR]${NC} ${timestamp} - ${message}"
-            ;;
-        "STEP") 
-            echo -e "\n${MAGENTA}[STEP]${NC} ${timestamp} - ${BOLD}${message}${NC}"
-            ;;
-        "DEBUG")
-            echo -e "${CYAN}[DEBUG]${NC} ${timestamp} - ${message}"
-            ;;
-    esac
-}
+# shellcheck disable=SC1091
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 
 # Check if required environment variables are set
 if [ -z "$AWS_ACCESS_KEY_ID" ] || [ -z "$AWS_SECRET_ACCESS_KEY" ]; then

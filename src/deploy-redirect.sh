@@ -9,48 +9,17 @@
 
 set -e
 
+# shellcheck disable=SC1091
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
+
 # Default values
 REGION="us-east-1"
 PROFILE=""
 YES_FLAG=false
-STATUS_FILE="$HOME/.aws-redirect-status.json"
-
-# Color codes for logging
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-BLUE='\033[0;34m'
-BOLD='\033[1m'
-NC='\033[0m' # No Color
-
-# Function to log messages with timestamp
-log() {
-    local level=$1
-    local message=$2
-    local timestamp=$(date "+%Y-%m-%d %H:%M:%S")
-    
-    case $level in
-        "INFO") 
-            echo -e "${BLUE}[INFO]${NC} ${timestamp} - ${message}"
-            ;;
-        "SUCCESS") 
-            echo -e "${GREEN}[SUCCESS]${NC} ${timestamp} - ${message}"
-            ;;
-        "WARN") 
-            echo -e "${YELLOW}[WARNING]${NC} ${timestamp} - ${message}"
-            ;;
-        "ERROR") 
-            echo -e "${RED}[ERROR]${NC} ${timestamp} - ${message}"
-            ;;
-        "STEP") 
-            echo -e "\n${MAGENTA}[STEP]${NC} ${timestamp} - ${BOLD}${message}${NC}"
-            ;;
-        "DEBUG")
-            echo -e "${CYAN}[DEBUG]${NC} ${timestamp} - ${message}"
-            ;;
-    esac
-}
-
+# Empty by default; init_status_file derives a per-target-domain path unless
+# --status-file overrides it. A single shared file caused state from one
+# deployment to leak into another (see .deploy-status-redirect-<target>.json).
+STATUS_FILE=""
 
 # Display usage information
 usage() {
@@ -62,6 +31,7 @@ usage() {
     echo "  --profile PROFILE            AWS CLI profile (optional)"
     echo "  --region REGION              AWS region (default: us-east-1)"
     echo "  --status-file FILE           Custom path for status tracking file"
+    echo "                               (default: ./.deploy-status-redirect-<target-domain>.json)"
     echo "  --yes                        Skip confirmation prompts"
     echo "  --help                       Display this help message"
     echo
@@ -119,15 +89,26 @@ check_aws_config() {
     
     local account_id=$($aws_cmd sts get-caller-identity --query Account --output text)
     local user=$($aws_cmd sts get-caller-identity --query Arn --output text)
-    
+
     log "INFO" "AWS credentials configured correctly."
     log "INFO" "AWS Account: $account_id"
     log "INFO" "AWS User: $user"
     log "INFO" "AWS Region: $REGION"
+
+    # Persist account_id so remove-redirect.sh can verify bucket ownership.
+    update_status "account_id" "$account_id"
 }
 
 # Initialize or load status file
 init_status_file() {
+    # Derive a per-deployment status file unless one was given with --status-file.
+    # Keyed on the target domain (one redirect deployment == one target) and
+    # namespaced with "redirect-" so it never collides with deploy-site.sh's
+    # .deploy-status-<domain>.json files for the same domain.
+    if [ -z "$STATUS_FILE" ]; then
+        STATUS_FILE=".deploy-status-redirect-${TARGET_DOMAIN}.json"
+    fi
+
     log "INFO" "Initializing status file at $STATUS_FILE..."
     
     if [ ! -f "$STATUS_FILE" ]; then
@@ -264,66 +245,67 @@ check_hosted_zones() {
         log "INFO" "Hosted zones already checked. Skipping..."
         return 0
     fi
-    
+
     log "INFO" "Checking Route53 hosted zones..."
-    
-    local aws_cmd="aws"
-    if [ -n "$PROFILE" ]; then
-        aws_cmd="aws --profile $PROFILE"
-    fi
-    
-    # Check target domain
-    local target_zone_id=$($aws_cmd route53 list-hosted-zones-by-name --dns-name "$TARGET_DOMAIN." --max-items 1 --query "HostedZones[?Name=='$TARGET_DOMAIN.'].Id" --output text | cut -d'/' -f3)
-    
-    if [ -z "$target_zone_id" ]; then
-        log "ERROR" "No Route53 hosted zone found for target domain: $TARGET_DOMAIN"
-        log "ERROR" "Please create a hosted zone for this domain before continuing."
+
+    # Target domain — accept either an exact zone or any parent that covers it.
+    local target_match
+    target_match=$(find_zone_for_domain "$TARGET_DOMAIN" "$PROFILE")
+    if [ -z "$target_match" ]; then
+        log "ERROR" "No Route53 hosted zone found for target domain $TARGET_DOMAIN or any parent"
+        log "ERROR" "Please create a hosted zone covering this domain before continuing."
         exit 1
     fi
-    
+    local target_zone_id="${target_match%%|*}"
+    local target_zone_name="${target_match#*|}"
     update_status "target_zone_id" "$target_zone_id"
-    log "INFO" "Found hosted zone for target domain: $target_zone_id"
-    
-    # Check source domains
+    update_status "target_zone_name" "$target_zone_name"
+    if [ "$target_zone_name" = "$TARGET_DOMAIN" ]; then
+        log "INFO" "Found hosted zone for target domain $TARGET_DOMAIN: $target_zone_id"
+    else
+        log "INFO" "Found parent hosted zone $target_zone_name covering target $TARGET_DOMAIN: $target_zone_id"
+    fi
+
+    # Source domains — same suffix-walk; record which zone covers each.
     local missing_zones=()
     local domains_json="["
-    
+    local first=1
+
     for domain in "${UNIQUE_DOMAINS[@]}"; do
-        # Find the root domain by splitting on dots and taking the last two parts
-        local domain_parts=(${domain//./ })
-        local domain_length=${#domain_parts[@]}
-        local root_domain=""
-        
-        if [ $domain_length -ge 2 ]; then
-            root_domain="${domain_parts[$((domain_length-2))]}.${domain_parts[$((domain_length-1))]}"
-        else
-            root_domain="$domain"
+        local match
+        match=$(find_zone_for_domain "$domain" "$PROFILE")
+
+        if [ -z "$match" ]; then
+            missing_zones+=("$domain")
+            continue
         fi
-        
-        log "INFO" "Checking domain: $domain (root: $root_domain)"
-        
-        # Look for the hosted zone of the root domain
-        local zone_id=$($aws_cmd route53 list-hosted-zones-by-name --dns-name "$root_domain." --max-items 1 --query "HostedZones[?Name=='$root_domain.'].Id" --output text | cut -d'/' -f3)
-        
-        if [ -z "$zone_id" ]; then
-            missing_zones+=("$domain -> $root_domain")
+
+        local zone_id="${match%%|*}"
+        local zone_name="${match#*|}"
+
+        if [ "$zone_name" = "$domain" ]; then
+            log "INFO" "Domain $domain → zone $zone_name ($zone_id)"
         else
-            if [ $((${#domains_json}-1)) -gt 1 ]; then
-                domains_json+=","
-            fi
-            domains_json+="{\"domain\":\"$domain\",\"root_domain\":\"$root_domain\",\"zone_id\":\"$zone_id\"}"
+            log "INFO" "Domain $domain → parent zone $zone_name ($zone_id)"
         fi
+
+        if [ $first -eq 1 ]; then
+            first=0
+        else
+            domains_json+=","
+        fi
+        domains_json+="{\"domain\":\"$domain\",\"root_domain\":\"$zone_name\",\"zone_id\":\"$zone_id\"}"
     done
-    
+
     domains_json+="]"
     update_status_array "domain_zones" "$domains_json"
-    
+
     if [ ${#missing_zones[@]} -gt 0 ]; then
-        log "ERROR" "No Route53 hosted zones found for the root domains of these domains: ${missing_zones[*]}"
-        log "ERROR" "Please create hosted zones for these root domains before continuing."
+        log "ERROR" "No Route53 hosted zone (or parent) found for: ${missing_zones[*]}"
+        log "ERROR" "Please create hosted zones covering these domains before continuing."
         exit 1
     fi
-    
+
     log "INFO" "All domains have corresponding Route53 hosted zones."
     mark_step_completed "check_hosted_zones"
 }
@@ -385,7 +367,10 @@ create_certificate() {
     if [ -n "$PROFILE" ]; then
         aws_cmd="aws --profile $PROFILE"
     fi
-    
+
+    # Certificate must be in us-east-1 for CloudFront
+    local cert_region="us-east-1"
+
     # Build domain list for certificate
     local san_array=()
     for domain in "${UNIQUE_DOMAINS[@]}"; do
@@ -396,30 +381,30 @@ create_certificate() {
             log "WARN" "Skipping invalid domain format: $domain"
         fi
     done
-    
+
     # Request certificate - use proper JSON array formatting for SANs
     local sans_json=$(printf '%s\n' "${san_array[@]}" | jq -R . | jq -s .)
-    
+
     # Request certificate
     local cert_arn=$($aws_cmd acm request-certificate \
         --domain-name "$TARGET_DOMAIN" \
         --subject-alternative-names "$sans_json" \
         --validation-method DNS \
-        --region "$REGION" \
+        --region "$cert_region" \
         --query CertificateArn \
         --output text)
-    
+
     update_status "certificate_arn" "$cert_arn"
     log "INFO" "Certificate requested: $cert_arn"
-    
+
     # Wait for certificate details to be available
     log "INFO" "Waiting for certificate details (this may take a moment)..."
     sleep 10
-    
+
     # Get validation records
     local validation_records=$($aws_cmd acm describe-certificate \
         --certificate-arn "$cert_arn" \
-        --region "$REGION" \
+        --region "$cert_region" \
         --query "Certificate.DomainValidationOptions[].{Domain:DomainName,Name:ResourceRecord.Name,Type:ResourceRecord.Type,Value:ResourceRecord.Value}")
     
     update_status_array "validation_records" "$validation_records"
@@ -463,7 +448,7 @@ create_certificate() {
     
     # Wait for certificate validation
     log "INFO" "Waiting for certificate validation (this may take 5-30 minutes)..."
-    $aws_cmd acm wait certificate-validated --certificate-arn "$cert_arn" --region "$REGION"
+    $aws_cmd acm wait certificate-validated --certificate-arn "$cert_arn" --region "$cert_region"
     
     log "INFO" "Certificate validated successfully."
     mark_step_completed "create_certificate"

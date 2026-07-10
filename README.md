@@ -8,10 +8,20 @@
 This needs a lot more testing on an empty account or super limited IAM credential set.
 It will be done soon, haven't had the time to test it properly yet.
 
-Getting closer
+## Getting Closer
 
-@todo standardize output style of help messages and instructions etc
+### TODOs
 
+- todo standardize output style of help messages and instructions etc
+- fix routing for 'website hosting' mode and defaults for CF->S3
+    - consider a CF function to do rewrites rather than Website mode
+    - in that case we can go back to an OAC rule and limit access to CF / actual domain only
+    - downside is -- may not serve index.html via subdirs unless referenced, eg:
+        - /gallery = /gallery.html
+        - /gallery (meaning directory) will not default to /gallery/index.html
+        - / = /index.html via CF default root object
+- check cache file status - is info stored properly?
+- consider /public as real docroot, allowing for private assets in parallel - can we do this w/ S3 as origin and not 'custom origin' ?
 
 
 
@@ -71,10 +81,56 @@ Options:
   --profile PROFILE            AWS CLI profile (optional)
   --region REGION              AWS region (default: us-east-1)
   --status-file FILE           Custom status file path
+  --create-scoped-user         Create an IAM user scoped to this site only
+  --clean-urls                 Serve /about as /about.html and /docs/ as
+                               /docs/index.html via a CloudFront Function
+  --basic-auth CSV             Require HTTP Basic auth (user:password pairs,
+                               comma-separated) via a CloudFront Function;
+                               logins are remembered in a session cookie
   --yes                        Skip all confirmation prompts
   --help                       Display this help message
 
 ```
+
+#### Edge behaviors (`--clean-urls`, `--basic-auth`)
+
+Both are opt-in and compile into a single viewer-request CloudFront Function
+(named `<domain-with-dashes>-viewer-request`) that is attached to the
+distribution. Nothing is created unless at least one flag is passed.
+
+- `--clean-urls` lets you upload `about.html` but link to `/about`. Requests
+  whose last path segment has no extension get `.html` appended; requests
+  ending in `/` get `index.html` appended.
+- `--basic-auth "alice:secret1,bob:secret2"` challenges anonymous requests
+  with HTTP 401. On a correct login the visitor is redirected once and given a
+  session cookie (random per-user token, `Secure; HttpOnly; SameSite=Lax`,
+  24h), which is then required to pass. The CSV is validated up front —
+  usernames are `[A-Za-z0-9._-]`, passwords may contain anything printable
+  except commas, duplicates are rejected — and the deploy aborts before
+  touching AWS if it's malformed. Credentials are embedded only in the edge
+  function; the status file records usernames, never passwords.
+
+#### Scoped IAM user (`--create-scoped-user`)
+
+Pass `--create-scoped-user` to provision an IAM user named `${domain}-site-admin`
+alongside the site. Its inline policy permits **only**:
+
+- `s3:ListBucket` / `s3:GetBucketLocation` on the provisioned bucket
+- `s3:GetObject` / `PutObject` / `DeleteObject` and the `*ObjectTagging` /
+  `*ObjectAcl` variants on objects in that bucket
+- `cloudfront:CreateInvalidation` / `GetInvalidation` / `ListInvalidations` on
+  the provisioned distribution
+
+This is enough for `sync.sh` (or any equivalent uploader) to push content and
+purge the CDN, and nothing else — it cannot touch other buckets, other
+distributions, IAM, Route53, or ACM. Useful for handing site-admin access to a
+teammate or a CI runner without granting account-wide privileges.
+
+The access key is printed once at the end of deployment and **is not written to
+the status file**. The user name, inline-policy name, and access key ID *are*
+stored in the status file so that `remove-site.sh` can clean up later. If the
+secret is lost, run `remove-site.sh` and re-deploy with `--create-scoped-user`
+to regenerate.
 
 ### Redirect
 
