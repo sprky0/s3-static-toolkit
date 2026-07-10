@@ -402,14 +402,16 @@ remove_origin_access_controls() {
     
     log "INFO" "Removing Origin Access Control: $oac_id"
     
-    # Check if OAC exists
-    if ! $aws_cmd cloudfront get-origin-access-control --id "$oac_id" &>/dev/null; then
+    # Check if OAC exists and grab its ETag — DeleteOriginAccessControl
+    # requires If-Match or fails with InvalidIfMatchVersion.
+    local etag
+    if ! etag=$($aws_cmd cloudfront get-origin-access-control --id "$oac_id" --query "ETag" --output text 2>/dev/null); then
         log "INFO" "Origin Access Control $oac_id does not exist, skipping"
         return 0
     fi
-    
+
     # Delete OAC
-    $aws_cmd cloudfront delete-origin-access-control --id "$oac_id"
+    $aws_cmd cloudfront delete-origin-access-control --id "$oac_id" --if-match "$etag"
     
     if [ $? -eq 0 ]; then
         log "SUCCESS" "Deleted Origin Access Control $oac_id"
