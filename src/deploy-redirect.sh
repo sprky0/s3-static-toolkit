@@ -31,7 +31,7 @@ usage() {
     echo "  --profile PROFILE            AWS CLI profile (optional)"
     echo "  --region REGION              AWS region (default: us-east-1)"
     echo "  --status-file FILE           Custom path for status tracking file"
-    echo "                               (default: ./.deploy-status-redirect-<target-domain>.json)"
+    echo "                               (default: {repo-root}/config/.deploy-status-redirect-<target-domain>.json)"
     echo "  --yes                        Skip confirmation prompts"
     echo "  --help                       Display this help message"
     echo
@@ -106,7 +106,7 @@ init_status_file() {
     # namespaced with "redirect-" so it never collides with deploy-site.sh's
     # .deploy-status-<domain>.json files for the same domain.
     if [ -z "$STATUS_FILE" ]; then
-        STATUS_FILE=".deploy-status-redirect-${TARGET_DOMAIN}.json"
+        STATUS_FILE="$(default_redirect_status_file "$TARGET_DOMAIN")" || exit 1
     fi
 
     log "INFO" "Initializing status file at $STATUS_FILE..."

@@ -46,7 +46,7 @@ show_help() {
 	echo -e "  s3st site sync --domain example.com --source ./dist --yes --dry"
 	echo -e "  s3st site remove --domain example.com --yes"
 	echo -e "  s3st redirect deploy --source-domains a.com,b.com --target-domain t.com --yes"
-	echo -e "  s3st redirect remove --status-file ~/.aws-redirect-status.json --yes"
+	echo -e "  s3st redirect remove --status-file config/.deploy-status-redirect-t.com.json --yes"
 	print_footer
 }
 

@@ -81,6 +81,7 @@ Options:
   --profile PROFILE            AWS CLI profile (optional)
   --region REGION              AWS region (default: us-east-1)
   --status-file FILE           Custom status file path
+                               (default: config/.deploy-status-<domain>.json)
   --create-scoped-user         Create an IAM user scoped to this site only
   --clean-urls                 Serve /about as /about.html and /docs/ as
                                /docs/index.html via a CloudFront Function
@@ -144,6 +145,7 @@ Options:
   --profile PROFILE            AWS CLI profile (optional)
   --region REGION              AWS region (default: us-east-1)
   --status-file FILE           Custom path for status tracking file
+                               (default: config/.deploy-status-redirect-<target-domain>.json)
   --yes                        Skip all confirmation prompts
   --help                       Display this help message
 
@@ -165,7 +167,8 @@ until things settle, eg: ACM cert validation, CF distribution deployment, yadda 
 
 ## Error Recovery
 
-The toolkit maintains a detailed status file (`deployment_status.json`) that tracks the progress of each step.
+The toolkit maintains a detailed status file per site under `config/` (`.deploy-status-<domain>.json`) that tracks the progress of each step.
+The `config/` directory lives at the repo root and may be a symlink to wherever your configs actually live; it is expected to exist.
 If an error occurs during deployment, you can attempt to fix the issue and run the script again - it will 
 automatically skip completed steps and continue from where it left off.
 
@@ -180,7 +183,9 @@ The toolkit includes a dedicated sync script that makes updating your website co
 src/sync.sh --status-file [file] [options]
 
 Options:
-  --status-file FILE       Status file from deployment (default: deployment_status.json)
+  --status-file FILE       Status file from deployment
+                           (default via --domain: config/.deploy-status-<domain>.json,
+                           otherwise: deployment_status.json)
   --source DIRECTORY       Local directory to sync (default: current directory)
   --profile PROFILE        AWS CLI profile to use
   --region REGION          AWS region (default: us-east-1)

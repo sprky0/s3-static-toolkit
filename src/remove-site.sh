@@ -23,7 +23,8 @@ usage() {
     echo -e "${BOLD}Usage:${NC} $0 --status-file status.json [options]"
     echo -e "${BOLD}Options:${NC}"
     echo "  --status-file FILE     Path to the status JSON file (required)"
-    echo "  --domain DOMAIN        Domain used to derive default status file (.deploy-status-<domain>.json)"
+    echo "  --domain DOMAIN        Domain used to derive default status file"
+    echo "                         ({repo-root}/config/.deploy-status-<domain>.json)"
     echo "  --profile PROFILE      AWS CLI profile (optional)"
     echo "  --yes                  Skip all confirmation prompts"
     echo "  --help                 Display this help message"
@@ -785,7 +786,7 @@ main() {
     done
 
     if [ -z "$STATUS_FILE" ] && [ -n "$DOMAIN" ]; then
-        STATUS_FILE=".deploy-status-${DOMAIN}.json"
+        STATUS_FILE="$(default_site_status_file "$DOMAIN")" || exit 1
     fi
     
     # Check for required parameters

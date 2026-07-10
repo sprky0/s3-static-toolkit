@@ -35,6 +35,7 @@ usage() {
     echo "  --region REGION          AWS region (default: us-east-1)"
     echo "  --yes                    Skip all confirmation prompts"
     echo "  --status-file FILE       Custom status file path"
+    echo "                           (default: {repo-root}/config/.deploy-status-<domain>.json)"
     echo "  --create-scoped-user     Also create an IAM user scoped to this site's"
     echo "                           bucket + distribution (read/write/delete on S3,"
     echo "                           CreateInvalidation on CloudFront only). Access"
@@ -164,7 +165,7 @@ check_aws_config() {
 # Function to initialize or load status file
 init_status_file() {
     if [ -z "$STATUS_FILE" ]; then
-        STATUS_FILE=".deploy-status-${DOMAIN}.json"
+        STATUS_FILE="$(default_site_status_file "$DOMAIN")" || exit 1
     fi
     
     if [ -f "$STATUS_FILE" ]; then

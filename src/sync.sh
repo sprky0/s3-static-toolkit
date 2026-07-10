@@ -28,7 +28,8 @@ usage() {
   echo ""
   echo "Options:"
   echo "  --status-file <file>     Status file from deployment"
-  echo "  --domain <domain>        Domain to derive default status file (.deploy-status-<domain>.json)"
+  echo "  --domain <domain>        Domain to derive default status file"
+  echo "                           ({repo-root}/config/.deploy-status-<domain>.json)"
   echo "  --source <directory>     Local directory to sync (default: current directory)"
   echo "  --profile <profile>      AWS CLI profile to use"
   echo "  --region <region>        AWS region (default: us-east-1)"
@@ -382,7 +383,7 @@ main() {
 
   if [ -z "$STATUS_FILE" ]; then
     if [ -n "$DOMAIN" ]; then
-      STATUS_FILE=".deploy-status-${DOMAIN}.json"
+      STATUS_FILE="$(default_site_status_file "$DOMAIN")" || exit 1
     else
       STATUS_FILE="deployment_status.json"
     fi

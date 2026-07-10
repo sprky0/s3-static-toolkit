@@ -84,24 +84,31 @@ confirm() {
 	[[ $response =~ ^[Yy] ]]
 }
 
-ensure_state_dir() {
-	local home_dir="${S3ST_HOME:-$HOME/.s3-static-toolkit}"
-	mkdir -p "$home_dir"
-	echo "$home_dir"
+# Repo root (lib/ lives at {repo-root}/src/lib)
+S3ST_REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+# Config directory holding per-site status files (.deploy-status-*.json).
+# Expected to exist at {repo-root}/config — commonly a symlink to wherever
+# the configs actually live. Override with S3ST_CONFIG_DIR.
+config_dir() {
+	local dir="${S3ST_CONFIG_DIR:-$S3ST_REPO_ROOT/config}"
+	if [[ ! -d "$dir" ]]; then # -d follows symlinks
+		log_error "Config directory not found: $dir (expected at {repo-root}/config)" >&2
+		return 1
+	fi
+	echo "$dir"
 }
 
 default_site_status_file() {
-	local domain="$1"
-	local home_dir
-	home_dir="$(ensure_state_dir)"
-	echo "${home_dir}/site-${domain}.json"
+	local domain="$1" dir
+	dir="$(config_dir)" || return 1
+	echo "${dir}/.deploy-status-${domain}.json"
 }
 
 default_redirect_status_file() {
-	local target_domain="$1"
-	local home_dir
-	home_dir="$(ensure_state_dir)"
-	echo "${home_dir}/redirect-${target_domain}.json"
+	local target_domain="$1" dir
+	dir="$(config_dir)" || return 1
+	echo "${dir}/.deploy-status-redirect-${target_domain}.json"
 }
 
 # find_zone_for_domain DOMAIN [AWS_PROFILE]
