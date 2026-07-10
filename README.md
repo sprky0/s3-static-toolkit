@@ -216,6 +216,11 @@ The distribution ID is provided in the deployment summary and also stored in the
 - **Custom Error Pages**: The default setup includes a basic error page. For custom error handling, upload additional error documents to S3 and update the CloudFront configuration.
 
 
+## Configs
+
+`./*.json` config files and `config` directory are ignored and not versioned as they contain private information. Store these securely locally, encrypt / decrypt as desired, and symlink.
+
+
 ## License
 
 This software is provided under the MIT license, which is provided below.  As i'm sure
