@@ -82,10 +82,33 @@ Options:
   --region REGION              AWS region (default: us-east-1)
   --status-file FILE           Custom status file path
   --create-scoped-user         Create an IAM user scoped to this site only
+  --clean-urls                 Serve /about as /about.html and /docs/ as
+                               /docs/index.html via a CloudFront Function
+  --basic-auth CSV             Require HTTP Basic auth (user:password pairs,
+                               comma-separated) via a CloudFront Function;
+                               logins are remembered in a session cookie
   --yes                        Skip all confirmation prompts
   --help                       Display this help message
 
 ```
+
+#### Edge behaviors (`--clean-urls`, `--basic-auth`)
+
+Both are opt-in and compile into a single viewer-request CloudFront Function
+(named `<domain-with-dashes>-viewer-request`) that is attached to the
+distribution. Nothing is created unless at least one flag is passed.
+
+- `--clean-urls` lets you upload `about.html` but link to `/about`. Requests
+  whose last path segment has no extension get `.html` appended; requests
+  ending in `/` get `index.html` appended.
+- `--basic-auth "alice:secret1,bob:secret2"` challenges anonymous requests
+  with HTTP 401. On a correct login the visitor is redirected once and given a
+  session cookie (random per-user token, `Secure; HttpOnly; SameSite=Lax`,
+  24h), which is then required to pass. The CSV is validated up front —
+  usernames are `[A-Za-z0-9._-]`, passwords may contain anything printable
+  except commas, duplicates are rejected — and the deploy aborts before
+  touching AWS if it's malformed. Credentials are embedded only in the edge
+  function; the status file records usernames, never passwords.
 
 #### Scoped IAM user (`--create-scoped-user`)
 

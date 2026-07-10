@@ -156,6 +156,22 @@ plan_origin_access_control() {
     echo
 }
 
+plan_cloudfront_function() {
+    local name=$(jq -r '.function_name // ""' "$STATUS_FILE")
+    if [ -z "$name" ] || [ "$name" = "null" ]; then return 0; fi
+
+    local aws_cmd=$(aws_cli)
+    echo -e "  ${BOLD}CloudFront function (viewer-request)${NC}"
+    echo -e "    Name: $name"
+
+    if $aws_cmd cloudfront describe-function --name "$name" &>/dev/null; then
+        echo -e "    Action: $(destruct DELETE)"
+    else
+        echo -e "    ${YELLOW}(does not exist in AWS; will skip)${NC}"
+    fi
+    echo
+}
+
 plan_certificate() {
     local arn=$(jq -r '.certificate_arn // ""' "$STATUS_FILE")
     if [ -z "$arn" ] || [ "$arn" = "null" ]; then return 0; fi
@@ -294,6 +310,7 @@ print_plan_and_confirm() {
 
     plan_cloudfront_distribution
     plan_origin_access_control
+    plan_cloudfront_function
     plan_certificate
     plan_validation_records
     plan_s3_bucket
@@ -417,6 +434,38 @@ remove_origin_access_controls() {
         log "SUCCESS" "Deleted Origin Access Control $oac_id"
     else
         log "ERROR" "Failed to delete Origin Access Control $oac_id"
+    fi
+}
+
+# Function to remove the viewer-request CloudFront function (created by
+# deploy-site.sh --clean-urls / --basic-auth). Must run after the distribution
+# is deleted — a function still associated with a distribution can't be removed.
+remove_cloudfront_function() {
+    log "STEP" "Removing CloudFront function"
+
+    local aws_cmd="aws"
+    if [ -n "$AWS_PROFILE" ]; then
+        aws_cmd="$aws_cmd --profile $AWS_PROFILE"
+    fi
+
+    local fn_name=$(jq -r '.function_name // ""' "$STATUS_FILE")
+    if [ -z "$fn_name" ] || [ "$fn_name" = "null" ]; then
+        log "INFO" "No CloudFront function found in status file"
+        return 0
+    fi
+
+    # DeleteFunction requires the current ETag via --if-match
+    local etag
+    if ! etag=$($aws_cmd cloudfront describe-function --name "$fn_name" --query "ETag" --output text 2>/dev/null); then
+        log "INFO" "CloudFront function $fn_name does not exist, skipping"
+        return 0
+    fi
+
+    log "INFO" "Deleting CloudFront function $fn_name"
+    if $aws_cmd cloudfront delete-function --name "$fn_name" --if-match "$etag"; then
+        log "SUCCESS" "Deleted CloudFront function $fn_name"
+    else
+        log "ERROR" "Failed to delete CloudFront function $fn_name"
     fi
 }
 
@@ -773,6 +822,7 @@ main() {
     # Execute cleanup steps in reverse order
     remove_cloudfront_distribution
     remove_origin_access_controls
+    remove_cloudfront_function
     remove_validation_records
     remove_certificate
     remove_s3_bucket

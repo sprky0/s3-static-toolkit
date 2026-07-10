@@ -18,6 +18,9 @@ DOMAIN=""
 STATUS_FILE=""
 AUTO_APPROVE=false
 CREATE_SCOPED_USER=false
+CLEAN_URLS=false
+BASIC_AUTH_CSV=""
+BASIC_AUTH_COOKIE="__s3st_auth"
 TIMEOUT_RETRIES=5
 CERTIFICATE_WAIT_SECONDS=120
 CERTIFICATE_WAIT_INTERVAL=10
@@ -37,6 +40,14 @@ usage() {
     echo "                           CreateInvalidation on CloudFront only). Access"
     echo "                           key is printed once and NOT saved to the status"
     echo "                           file."
+    echo "  --clean-urls             Rewrite extension-less paths at the edge via a"
+    echo "                           CloudFront Function: /about serves /about.html,"
+    echo "                           /docs/ serves /docs/index.html. Off by default."
+    echo "  --basic-auth CSV         Comma-separated user:password pairs. Protects the"
+    echo "                           distribution with HTTP Basic auth via a CloudFront"
+    echo "                           Function; a successful login is remembered in a"
+    echo "                           cookie. Credentials live only in the edge function,"
+    echo "                           never in the status file. Off by default."
     echo "  --help                   Display this help message"
     exit "$exit_code"
 }
@@ -61,6 +72,71 @@ check_prerequisites() {
     fi
     
     log "SUCCESS" "All required tools are installed"
+}
+
+# Function to validate the --basic-auth CSV. Runs before anything else so a
+# malformed credential list never leaves half-provisioned resources behind.
+# Error messages reference entries by position to avoid echoing passwords.
+validate_basic_auth_csv() {
+    if [ -z "$BASIC_AUTH_CSV" ]; then
+        return 0
+    fi
+
+    log "STEP" "Validating --basic-auth credentials"
+
+    local pairs
+    IFS=',' read -ra pairs <<< "$BASIC_AUTH_CSV"
+
+    if [ ${#pairs[@]} -eq 0 ]; then
+        log "ERROR" "--basic-auth: no user:password pairs found"
+        exit 1
+    fi
+
+    local seen_users=" "
+    local i=0
+    local pair user pass
+    for pair in "${pairs[@]}"; do
+        i=$((i + 1))
+        if [ -z "$pair" ]; then
+            log "ERROR" "--basic-auth: entry $i is empty (check for stray commas)"
+            exit 1
+        fi
+        case "$pair" in
+            *:*) ;;
+            *)
+                log "ERROR" "--basic-auth: entry $i is not in user:password form"
+                exit 1
+                ;;
+        esac
+        user="${pair%%:*}"
+        pass="${pair#*:}"
+        if [ -z "$user" ]; then
+            log "ERROR" "--basic-auth: entry $i has an empty username"
+            exit 1
+        fi
+        if [ -z "$pass" ]; then
+            log "ERROR" "--basic-auth: entry $i (user '$user') has an empty password"
+            exit 1
+        fi
+        if ! [[ "$user" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            log "ERROR" "--basic-auth: entry $i has an invalid username (allowed: letters, digits, '.', '_', '-')"
+            exit 1
+        fi
+        if [[ "$pass" =~ [^[:print:]] ]]; then
+            log "ERROR" "--basic-auth: entry $i (user '$user') has a password with non-printable characters"
+            exit 1
+        fi
+        case "$seen_users" in
+            *" $user "*)
+                log "ERROR" "--basic-auth: duplicate username '$user' (entry $i)"
+                exit 1
+                ;;
+        esac
+        seen_users="${seen_users}${user} "
+    done
+
+    log "SUCCESS" "--basic-auth: validated ${#pairs[@]} user:password pair(s)"
+    return 0
 }
 
 # Function to check AWS CLI configuration
@@ -473,6 +549,184 @@ EOF
 }
 
 
+# Emit the JavaScript for the viewer-request CloudFront Function to stdout.
+# CloudFront allows a single function per event type, so both optional
+# behaviors (basic auth, clean URLs) are compiled into one handler containing
+# only the blocks that were requested. Auth flow: a valid session cookie
+# passes immediately; otherwise valid Basic credentials trigger a 302 back to
+# the same URI that sets the cookie (checking the cookie FIRST is what
+# prevents a redirect loop, since browsers keep resending Authorization);
+# anything else gets a 401 challenge.
+build_viewer_request_code() {
+    echo "function handler(event) {"
+    echo "    var request = event.request;"
+
+    if [ -n "$BASIC_AUTH_CSV" ]; then
+        local tokens_js=""
+        local valid_js=""
+        local pairs pair cred_b64 token
+        IFS=',' read -ra pairs <<< "$BASIC_AUTH_CSV"
+        for pair in "${pairs[@]}"; do
+            cred_b64=$(printf '%s' "$pair" | base64)
+            token=$(openssl rand -hex 32)
+            tokens_js="${tokens_js}        '${cred_b64}': '${token}',"$'\n'
+            valid_js="${valid_js}        '${token}': true,"$'\n'
+        done
+
+        cat <<EOF
+    var TOKENS = {
+${tokens_js}    };
+    var VALID = {
+${valid_js}    };
+    var authed = false;
+    if (request.cookies['${BASIC_AUTH_COOKIE}'] && VALID[request.cookies['${BASIC_AUTH_COOKIE}'].value]) {
+        authed = true;
+    }
+    if (!authed) {
+        var token = '';
+        if (request.headers.authorization) {
+            var auth = request.headers.authorization.value;
+            if (auth.substring(0, 6) === 'Basic ') {
+                token = TOKENS[auth.substring(6)] || '';
+            }
+        }
+        if (!token) {
+            return {
+                statusCode: 401,
+                statusDescription: 'Unauthorized',
+                headers: {
+                    'www-authenticate': { value: 'Basic realm="Restricted"' }
+                }
+            };
+        }
+        var location = request.uri;
+        var qs = [];
+        for (var key in request.querystring) {
+            qs.push(key + '=' + request.querystring[key].value);
+        }
+        if (qs.length > 0) {
+            location = location + '?' + qs.join('&');
+        }
+        return {
+            statusCode: 302,
+            statusDescription: 'Found',
+            headers: {
+                'location': { value: location }
+            },
+            cookies: {
+                '${BASIC_AUTH_COOKIE}': {
+                    value: token,
+                    attributes: 'Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=86400'
+                }
+            }
+        };
+    }
+EOF
+    fi
+
+    if [ "$CLEAN_URLS" = true ]; then
+        cat <<'EOF'
+    var uri = request.uri;
+    if (uri.charAt(uri.length - 1) === '/') {
+        request.uri = uri + 'index.html';
+    } else if (uri.substring(uri.lastIndexOf('/') + 1).indexOf('.') === -1) {
+        request.uri = uri + '.html';
+    }
+EOF
+    fi
+
+    echo "    return request;"
+    echo "}"
+}
+
+# Function to create/update and publish the viewer-request CloudFront Function.
+# No-op unless --clean-urls and/or --basic-auth was requested.
+create_viewer_request_function() {
+    if [ "$CLEAN_URLS" != true ] && [ -z "$BASIC_AUTH_CSV" ]; then
+        return 0
+    fi
+
+    if is_step_completed "cf_function"; then
+        local existing_arn=$(get_status "function_arn" "")
+        if [ -n "$existing_arn" ]; then
+            log "INFO" "CloudFront function already created (ARN: $existing_arn)"
+            return 0
+        fi
+        log "WARN" "CloudFront function marked as completed but ARN is empty, will attempt to (re)create"
+        update_status "cf_function_completed" "false"
+    fi
+
+    log "STEP" "Creating CloudFront viewer-request function for $DOMAIN"
+
+    local aws_cmd="aws"
+    if [ -n "$AWS_PROFILE" ]; then
+        aws_cmd="$aws_cmd --profile $AWS_PROFILE"
+    fi
+
+    # Function names only allow [a-zA-Z0-9-_]
+    local fn_name="$(echo "$DOMAIN" | tr '.' '-')-viewer-request"
+    local fn_config="Comment=Viewer-request function for ${DOMAIN},Runtime=cloudfront-js-2.0"
+
+    local code_file=$(mktemp)
+    build_viewer_request_code > "$code_file"
+
+    # Create or update depending on whether the function already exists
+    local etag fn_result
+    etag=$($aws_cmd cloudfront describe-function --name "$fn_name" --query "ETag" --output text 2>/dev/null) || etag=""
+
+    if [ -n "$etag" ] && [ "$etag" != "None" ]; then
+        log "INFO" "Function $fn_name already exists, updating code"
+        if ! fn_result=$($aws_cmd cloudfront update-function \
+            --name "$fn_name" \
+            --if-match "$etag" \
+            --function-config "$fn_config" \
+            --function-code "fileb://${code_file}" \
+            --output json); then
+            rm -f "$code_file"
+            log "ERROR" "Failed to update CloudFront function $fn_name"
+            return 1
+        fi
+    else
+        log "INFO" "Creating function $fn_name"
+        if ! fn_result=$($aws_cmd cloudfront create-function \
+            --name "$fn_name" \
+            --function-config "$fn_config" \
+            --function-code "fileb://${code_file}" \
+            --output json); then
+            rm -f "$code_file"
+            log "ERROR" "Failed to create CloudFront function $fn_name"
+            return 1
+        fi
+    fi
+    rm -f "$code_file"
+
+    local fn_arn=$(echo "$fn_result" | jq -r '.FunctionSummary.FunctionMetadata.FunctionARN')
+    etag=$(echo "$fn_result" | jq -r '.ETag')
+
+    if [ -z "$fn_arn" ] || [ "$fn_arn" = "null" ]; then
+        log "ERROR" "Failed to extract function ARN from result"
+        return 1
+    fi
+
+    # Publish to LIVE — the distribution can only associate a published function
+    log "INFO" "Publishing function $fn_name"
+    if ! $aws_cmd cloudfront publish-function --name "$fn_name" --if-match "$etag" >/dev/null; then
+        log "ERROR" "Failed to publish CloudFront function $fn_name"
+        return 1
+    fi
+
+    log "SUCCESS" "CloudFront function created and published (ARN: $fn_arn)"
+    update_status "function_name" "$fn_name"
+    update_status "function_arn" "$fn_arn"
+    update_status "clean_urls" "$CLEAN_URLS"
+    if [ -n "$BASIC_AUTH_CSV" ]; then
+        # Usernames only — passwords are never persisted
+        local users=$(echo "$BASIC_AUTH_CSV" | tr ',' '\n' | cut -d: -f1 | paste -sd' ' -)
+        update_status "basic_auth_users" "$users"
+    fi
+    mark_step_completed "cf_function"
+    return 0
+}
 
 
 # Function to create CloudFront distribution
@@ -531,6 +785,10 @@ create_cloudfront_distribution() {
             local existing_dist_domain=$(echo "$distributions" | jq -r --arg id "$existing_dist_id" '.DistributionList.Items[] | select(.Id == $id) | .DomainName' 2>/dev/null)
             
             log "INFO" "Found existing distribution for $DOMAIN (ID: $existing_dist_id, Domain: $existing_dist_domain)"
+            if [ -n "$(get_status "function_arn" "")" ]; then
+                log "WARN" "Reusing an existing distribution: the viewer-request function was NOT attached to it."
+                log "WARN" "Associate $(get_status "function_name" "") manually if --clean-urls/--basic-auth should apply."
+            fi
             update_status "distribution_id" "$existing_dist_id"
             update_status "distribution_domain" "$existing_dist_domain"
             mark_step_completed "cloudfront"
@@ -542,6 +800,26 @@ create_cloudfront_distribution() {
         fi
     fi
     
+    # Attach the viewer-request function if one was provisioned
+    local fn_arn=$(get_status "function_arn" "")
+    local function_associations
+    if [ -n "$fn_arn" ]; then
+        function_associations=$(cat <<EOF
+{
+            "Quantity": 1,
+            "Items": [
+                {
+                    "FunctionARN": "${fn_arn}",
+                    "EventType": "viewer-request"
+                }
+            ]
+        }
+EOF
+)
+    else
+        function_associations='{ "Quantity": 0 }'
+    fi
+
     # Prepare distribution config
     local dist_config_file=$(mktemp)
     cat > "$dist_config_file" <<EOF
@@ -597,6 +875,7 @@ create_cloudfront_distribution() {
             "Quantity": 0
         },
         "FieldLevelEncryptionId": "",
+        "FunctionAssociations": ${function_associations},
         "CachePolicyId": "658327ea-f89d-4fab-a63d-7e88639e58f6",
         "OriginRequestPolicyId": "88a5eaf4-2fd4-4709-b370-b4c650ea3fcf"
     },
@@ -1009,7 +1288,24 @@ verify_deployment() {
     
     # Try to access the website
     log "INFO" "Checking website accessibility..."
-    local http_code=$(curl -s -o /dev/null -w "%{http_code}" "https://$DOMAIN")
+    local http_code
+    if [ -n "$BASIC_AUTH_CSV" ]; then
+        # With basic auth enabled, an anonymous request must be challenged...
+        local unauth_code=$(curl -s -o /dev/null -w "%{http_code}" "https://$DOMAIN")
+        if [ "$unauth_code" = "401" ]; then
+            log "SUCCESS" "Unauthenticated request correctly challenged (HTTP 401)"
+        else
+            log "WARN" "Expected HTTP 401 without credentials, got HTTP $unauth_code"
+        fi
+        # ...and the first credential pair must get through (302 sets the
+        # session cookie, -L -b/-c follows with it).
+        local first_pair="${BASIC_AUTH_CSV%%,*}"
+        local cookie_jar=$(mktemp)
+        http_code=$(curl -s -o /dev/null -w "%{http_code}" -L -u "$first_pair" -c "$cookie_jar" -b "$cookie_jar" "https://$DOMAIN")
+        rm -f "$cookie_jar"
+    else
+        http_code=$(curl -s -o /dev/null -w "%{http_code}" "https://$DOMAIN")
+    fi
     
     if [ "$http_code" = "200" ]; then
         log "SUCCESS" "Website is accessible (HTTP 200)"
@@ -1189,6 +1485,15 @@ display_summary() {
     echo -e "${BOLD}CloudFront Distribution:${NC} $(get_status "distribution_id" "N/A")"
     echo -e "${BOLD}Distribution Domain:${NC} $(get_status "distribution_domain" "N/A")"
     echo -e "${BOLD}Status File:${NC} $STATUS_FILE"
+    local fn_name=$(get_status "function_name" "")
+    if [ -n "$fn_name" ]; then
+        echo -e "${BOLD}CloudFront Function:${NC} $fn_name"
+        echo -e "  clean-urls: $(get_status "clean_urls" "false")"
+        local ba_users=$(get_status "basic_auth_users" "")
+        if [ -n "$ba_users" ]; then
+            echo -e "  basic-auth users: $ba_users (session cookie: $BASIC_AUTH_COOKIE)"
+        fi
+    fi
     local scoped_user=$(get_status "scoped_user_name" "")
     if [ -n "$scoped_user" ]; then
         echo -e "${BOLD}Scoped IAM User:${NC} $scoped_user (Access Key: $(get_status "scoped_user_access_key_id" "N/A"))"
@@ -1259,6 +1564,15 @@ main() {
                 CREATE_SCOPED_USER=true
                 shift
                 ;;
+            --clean-urls)
+                CLEAN_URLS=true
+                shift
+                ;;
+            --basic-auth)
+                BASIC_AUTH_CSV="$2"
+                shift
+                shift
+                ;;
             --help)
                 usage 0
                 ;;
@@ -1274,7 +1588,10 @@ main() {
         log "ERROR" "Domain name is required"
         usage
     fi
-    
+
+    # Validate --basic-auth input before doing anything else
+    validate_basic_auth_csv
+
     # Welcome message
     echo -e "${CYAN}╔════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${CYAN}║            ${BOLD}AWS STATIC SITE DEPLOYMENT SCRIPT${NC}${CYAN}               ║${NC}"
@@ -1307,6 +1624,7 @@ main() {
     create_s3_bucket
     create_certificate
     create_oac
+    create_viewer_request_function
     create_cloudfront_distribution
     create_dns_records
     upload_sample_content
