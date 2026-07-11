@@ -18,8 +18,11 @@ always identical (decided; no `main` exception):
 
 > **Status: implemented** by `src/setup-ci.sh` (provisioning + workflow
 > generation, with a sha256 tamper check on the generated workflow) and
-> `src/remove-ci.sh` (teardown). See the README's "CI: Push-to-Deploy via
-> GitHub Actions" section for usage.
+> `src/remove-ci.sh` (teardown). Setups are amendable: re-runs merge new
+> `--env` flags with previously configured environments (add production
+> later without re-stating stage), and `--remove-env NAME` surgically
+> drops one environment. See the README's "CI: Push-to-Deploy via GitHub
+> Actions" section for usage.
 
 ## Why GitHub Environments, not just branch conditionals
 

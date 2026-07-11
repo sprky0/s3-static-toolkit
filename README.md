@@ -225,7 +225,10 @@ Options:
   --repo ORG/REPO          GitHub repo slug (default: derived from the clone's origin remote)
   --env NAME=DOMAIN        Environment mapping, repeatable (prompted if omitted).
                            NAME is both the GitHub environment and its deploy branch;
-                           DOMAIN must have a deploy-site.sh status file in config/
+                           DOMAIN must have a deploy-site.sh status file in config/.
+                           Re-runs merge: previously configured environments are kept
+  --remove-env NAME        Remove one environment (IAM role + GitHub environment) and
+                           regenerate the workflow; other environments are untouched
   --docroot PATH           Directory inside the site repo to sync (default: .)
   --region REGION          AWS region variable for the workflow (default: us-east-1)
   --profile PROFILE        AWS CLI profile (optional)
@@ -271,6 +274,31 @@ src/setup-ci.sh --check --repo org/repo   # exit 0 = intact, 1 = modified or mis
 
 tells you whether anyone has edited the workflow in the site repo since it was
 generated. Re-runs also warn before overwriting a drifted file.
+
+**Amending over time.** Re-runs are additive, so you can wire environments up as
+they're ready — stage first, production when it exists:
+
+```bash
+# later, after example.com is deployed — stage is kept automatically:
+src/setup-ci.sh --repo-path ~/gits/my-site --env production=example.com
+```
+
+Environments recorded in the CI status file are carried forward without being
+touched (existing roles are skipped, GitHub settings converge idempotently), and the
+workflow regenerates as the union — commit it and merge it into the new branch.
+Existing deploy branches keep working throughout: GitHub runs the workflow copy on
+the pushed branch, so nothing depends on the amendment landing everywhere at once.
+Re-specifying an existing environment with a *different* domain re-points it after a
+confirmation (the old domain's IAM role is deleted so it can't linger with access to
+the old bucket). To drop a single environment without touching the rest:
+
+```bash
+src/setup-ci.sh --remove-env stage --repo org/repo
+```
+
+deletes that environment's IAM role and GitHub environment, regenerates the workflow
+without its branch, and reminds you to delete the branch itself (its own workflow
+copy would otherwise still trigger on push).
 
 Teardown mirrors the rest of the toolkit — prints a full plan, then removes the IAM
 roles and GitHub environments (the shared OIDC provider, the sites themselves, and the

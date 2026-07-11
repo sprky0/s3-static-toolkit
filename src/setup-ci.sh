@@ -18,6 +18,12 @@
 # "production" environment. Enforcement lives in the GitHub environment's
 # deployment-branch policy, not in the workflow file.
 #
+# Re-runs are amendments, not replacements: environments recorded in the CI
+# status file from previous runs are kept automatically, so you can wire
+# stage first and add production later with a single --env flag. Existing
+# environments are only converged (idempotent PUTs/upserts), never torn
+# down. To drop a single environment, use --remove-env NAME.
+#
 # The generated workflow's sha256 is recorded in the CI status file; re-runs
 # and --check compare it against the file in the site repo to detect edits
 # made outside this toolkit.
@@ -37,6 +43,7 @@ STATUS_FILE=""
 NO_APPROVAL=false
 CHECK_ONLY=false
 AUTO_APPROVE=false
+REMOVE_ENV=""
 
 # Populated during execution
 ACCOUNT_ID=""
@@ -54,7 +61,12 @@ usage() {
     echo "  --repo ORG/REPO          GitHub repo slug (default: derived from the clone's origin remote)"
     echo "  --env NAME=DOMAIN        Environment mapping, repeatable (prompted if omitted)."
     echo "                           NAME is both the GitHub environment and its deploy branch;"
-    echo "                           DOMAIN must have a deploy-site.sh status file in config/"
+    echo "                           DOMAIN must have a deploy-site.sh status file in config/."
+    echo "                           Re-runs merge: environments from previous runs are kept,"
+    echo "                           so passing only a new one adds it without dropping the rest"
+    echo "  --remove-env NAME        Remove one environment from an existing setup (deletes its"
+    echo "                           IAM role and GitHub environment, regenerates the workflow;"
+    echo "                           other environments are untouched). Needs --repo or --status-file"
     echo "  --docroot PATH           Directory inside the site repo to sync (default: .)"
     echo "  --region REGION          AWS region variable for the workflow (default: us-east-1)"
     echo "  --profile PROFILE        AWS CLI profile (optional)"
@@ -71,6 +83,9 @@ usage() {
     echo "     --env integration=integration.example.com \\"
     echo "     --env stage=stage.example.com \\"
     echo "     --env production=example.com"
+    echo ""
+    echo "Amend later (adds production; previously configured environments are kept):"
+    echo "  $0 --repo-path ~/gits/my-site --env production=example.com"
     exit "$exit_code"
 }
 
@@ -181,19 +196,13 @@ prompt_for_missing_inputs() {
     # Expand ~ if the shell didn't
     REPO_PATH="${REPO_PATH/#\~/$HOME}"
 
-    if [ ${#ENV_SPECS[@]} -eq 0 ]; then
-        if [ "$AUTO_APPROVE" = true ]; then
-            log "ERROR" "At least one --env NAME=DOMAIN is required with --yes"
-            usage
-        fi
+    if [ ${#ENV_SPECS[@]} -eq 0 ] && [ "$AUTO_APPROVE" != true ]; then
         echo -e "${CYAN}Define environments. The name is both the GitHub environment and its${NC}"
         echo -e "${CYAN}deploy branch (e.g. integration, stage, production). Blank name to finish.${NC}"
+        echo -e "${CYAN}(Amending a previous setup? Recorded environments are kept automatically;${NC}"
+        echo -e "${CYAN}only name the ones you are adding or changing.)${NC}"
         while true; do
-            if [ ${#ENV_SPECS[@]} -eq 0 ]; then
-                echo -en "${YELLOW}Environment name: ${NC}"
-            else
-                echo -en "${YELLOW}Environment name (blank to finish): ${NC}"
-            fi
+            echo -en "${YELLOW}Environment name (blank to finish): ${NC}"
             read -r env_name
             [ -z "$env_name" ] && break
             echo -en "${YELLOW}Deployed domain for '$env_name': ${NC}"
@@ -206,10 +215,8 @@ prompt_for_missing_inputs() {
         done
     fi
 
-    if [ ${#ENV_SPECS[@]} -eq 0 ]; then
-        log "ERROR" "No environments defined"
-        usage
-    fi
+    # Zero specs is allowed here: a previous run may have recorded environments
+    # (merge_existing_envs errors out if the union is still empty).
 }
 
 parse_env_specs() {
@@ -311,6 +318,108 @@ check_aws_config() {
     ACCOUNT_ID="$caller_account"
     update_status "account_id" "$ACCOUNT_ID"
     log "SUCCESS" "Using AWS account $ACCOUNT_ID"
+}
+
+# =============================================================================
+# Environment merging (amendments)
+# =============================================================================
+
+# Delete an environment's deploy role (inline policy first). Used when an
+# environment is re-pointed at a new domain (the role name embeds the domain)
+# and by --remove-env.
+remove_deploy_role() {
+    local name=$1
+    local role_name=$2
+    local policy_name=$3
+    local aws_cmd=$(aws_cli)
+
+    if [ -z "$role_name" ]; then
+        return 0
+    fi
+    if ! $aws_cmd iam get-role --role-name "$role_name" &>/dev/null; then
+        log "INFO" "[$name] role $role_name does not exist, nothing to delete"
+        return 0
+    fi
+    if [ -n "$policy_name" ]; then
+        $aws_cmd iam delete-role-policy --role-name "$role_name" --policy-name "$policy_name" 2>/dev/null
+    fi
+    if $aws_cmd iam delete-role --role-name "$role_name"; then
+        log "SUCCESS" "[$name] deleted role $role_name"
+    else
+        log "ERROR" "[$name] failed to delete role $role_name"
+        exit 1
+    fi
+}
+
+# Re-runs are amendments, not replacements. Environments recorded in the
+# status file but not named this run are carried forward, so adding
+# production to an existing stage setup is just --env production=example.com:
+# stage stays in the workflow, its role and GitHub environment untouched.
+merge_existing_envs() {
+    log "STEP" "Merging with previously configured environments"
+
+    local recorded=()
+    local recorded_csv=$(get_status "environments" "")
+    if [ -n "$recorded_csv" ]; then
+        IFS=',' read -r -a recorded <<< "$recorded_csv"
+    fi
+
+    # Re-specifying an existing environment with a different domain re-points
+    # it. The old role must be deleted, not just replaced: the role name
+    # embeds the domain, and the orphan would keep granting this
+    # environment's OIDC tokens access to the old bucket.
+    local i name old_domain
+    for i in "${!ENV_NAMES[@]}"; do
+        name="${ENV_NAMES[$i]}"
+        old_domain=$(get_status "env_${name}_domain" "")
+        if [ -n "$old_domain" ] && [ "$old_domain" != "${ENV_DOMAINS[$i]}" ]; then
+            log "WARN" "[$name] was previously configured for $old_domain, now given ${ENV_DOMAINS[$i]}"
+            # Validate the new domain is deployed BEFORE deleting anything,
+            # so a typo can't leave the environment with no role at all.
+            local new_site_file
+            new_site_file="$(default_site_status_file "${ENV_DOMAINS[$i]}")" || exit 1
+            if [ ! -f "$new_site_file" ]; then
+                log "ERROR" "[$name] cannot re-point to ${ENV_DOMAINS[$i]}: no deployment status file ($new_site_file)"
+                log "ERROR" "Deploy the site first: src/deploy-site.sh --domain ${ENV_DOMAINS[$i]}"
+                exit 1
+            fi
+            if ! confirm_action "Re-point '$name' to ${ENV_DOMAINS[$i]}? (the old role for $old_domain will be deleted)"; then
+                log "INFO" "Cancelled"
+                exit 0
+            fi
+            remove_deploy_role "$name" \
+                "$(get_status "env_${name}_role_name" "")" \
+                "$(get_status "env_${name}_role_policy_name" "")"
+            update_status "role_${name}_completed" "false"
+        fi
+    done
+
+    # Carry forward recorded environments not named this run
+    local rec passed found domain
+    for rec in "${recorded[@]}"; do
+        [ -z "$rec" ] && continue
+        found=false
+        for passed in "${ENV_NAMES[@]}"; do
+            [ "$passed" = "$rec" ] && found=true
+        done
+        [ "$found" = true ] && continue
+
+        domain=$(get_status "env_${rec}_domain" "")
+        if [ -z "$domain" ]; then
+            log "ERROR" "Recorded environment '$rec' has no domain in $STATUS_FILE (inconsistent status file)"
+            exit 1
+        fi
+        ENV_NAMES+=("$rec")
+        ENV_DOMAINS+=("$domain")
+        log "INFO" "[$rec] keeping existing environment -> $domain"
+    done
+
+    if [ ${#ENV_NAMES[@]} -eq 0 ]; then
+        log "ERROR" "No environments: none passed with --env and none recorded in $STATUS_FILE"
+        exit 1
+    fi
+
+    log "SUCCESS" "Configuring environments: $(IFS=,; echo "${ENV_NAMES[*]}")"
 }
 
 # =============================================================================
@@ -787,6 +896,112 @@ check_workflow_integrity() {
 }
 
 # =============================================================================
+# --remove-env: surgical removal of one environment
+# =============================================================================
+
+# Drop every status-file key belonging to one environment.
+purge_env_from_status() {
+    local name=$1
+    local temp_file=$(mktemp)
+    jq --arg env "env_${name}_" \
+       --arg role "role_${name}_completed" \
+       --arg ghe "gh_env_${name}_completed" \
+        'with_entries(select((.key | startswith($env) or startswith($role) or startswith($ghe)) | not))' \
+        "$STATUS_FILE" > "$temp_file"
+    mv "$temp_file" "$STATUS_FILE"
+}
+
+# Remove a single environment: its IAM role, its GitHub environment, its
+# status-file entries, and its branch in the regenerated workflow. Every
+# other environment is left exactly as it is.
+remove_environment() {
+    local name="$REMOVE_ENV"
+
+    REPO_SLUG=$(get_status "repo_slug" "")
+    if [ -z "$REPO_SLUG" ]; then
+        log "ERROR" "Status file has no repo_slug: $STATUS_FILE"
+        exit 1
+    fi
+
+    local recorded=() remaining=()
+    local env_csv=$(get_status "environments" "")
+    if [ -n "$env_csv" ]; then
+        IFS=',' read -r -a recorded <<< "$env_csv"
+    fi
+    local found=false e
+    for e in "${recorded[@]}"; do
+        [ -z "$e" ] && continue
+        if [ "$e" = "$name" ]; then
+            found=true
+        else
+            remaining+=("$e")
+        fi
+    done
+    if [ "$found" != true ]; then
+        log "ERROR" "Environment '$name' is not configured for $REPO_SLUG (recorded: ${env_csv:-none})"
+        exit 1
+    fi
+    if [ ${#remaining[@]} -eq 0 ]; then
+        log "ERROR" "'$name' is the only environment for $REPO_SLUG."
+        log "ERROR" "To tear down CI entirely, use remove-ci.sh instead."
+        exit 1
+    fi
+
+    local domain=$(get_status "env_${name}_domain" "?")
+    local role_name=$(get_status "env_${name}_role_name" "")
+    local policy_name=$(get_status "env_${name}_role_policy_name" "")
+
+    echo -e "${BOLD}Repository:${NC}  $REPO_SLUG"
+    echo -e "${BOLD}Removing:${NC}    $name ($domain) — IAM role and GitHub environment"
+    echo -e "${BOLD}Keeping:${NC}     $(IFS=,; echo "${remaining[*]}")"
+    log "INFO" "The $domain site itself (bucket, distribution, DNS) is not touched."
+    if ! confirm_action "Remove environment '$name' from CI?"; then
+        log "INFO" "Cancelled"
+        exit 0
+    fi
+
+    check_aws_config
+    remove_deploy_role "$name" "$role_name" "$policy_name"
+
+    if gh api "repos/$REPO_SLUG/environments/$name" &>/dev/null; then
+        if gh api -X DELETE "repos/$REPO_SLUG/environments/$name" >/dev/null; then
+            log "SUCCESS" "[$name] deleted GitHub environment (vars and policies removed with it)"
+        else
+            log "ERROR" "[$name] failed to delete GitHub environment"
+            exit 1
+        fi
+    else
+        log "INFO" "[$name] GitHub environment does not exist on GitHub, skipping"
+    fi
+
+    purge_env_from_status "$name"
+    update_status "environments" "$(IFS=,; echo "${remaining[*]}")"
+
+    # Regenerate the workflow without the removed branch
+    ENV_NAMES=("${remaining[@]}")
+    ENV_DOMAINS=()
+    for e in "${remaining[@]}"; do
+        ENV_DOMAINS+=("$(get_status "env_${e}_domain" "")")
+    done
+    REPO_PATH="${REPO_PATH:-$(get_status "repo_path" "")}"
+    REPO_PATH="${REPO_PATH/#\~/$HOME}"
+    DOCROOT=$(get_status "docroot" "$DOCROOT")
+    AWS_REGION=$(get_status "region" "$AWS_REGION")
+    if [ -n "$REPO_PATH" ] && [ -d "$REPO_PATH" ]; then
+        generate_workflow
+        log "INFO" "Commit the updated workflow in the site repo."
+    else
+        log "WARN" "Site repo clone not found (${REPO_PATH:-unset}); pass --repo-path or re-run setup to regenerate the workflow"
+    fi
+
+    log "WARN" "If the '$name' branch still exists in the site repo, its old workflow copy"
+    log "WARN" "will still trigger on push (and fail, or auto-recreate an unprotected '$name'"
+    log "WARN" "environment on GitHub). Delete the branch or remove the workflow file from it."
+    log "SUCCESS" "Environment '$name' removed from CI"
+    exit 0
+}
+
+# =============================================================================
 # Summary
 # =============================================================================
 
@@ -888,6 +1103,11 @@ main() {
                 NO_APPROVAL=true
                 shift
                 ;;
+            --remove-env)
+                REMOVE_ENV="$2"
+                shift
+                shift
+                ;;
             --check)
                 CHECK_ONLY=true
                 shift
@@ -923,6 +1143,29 @@ main() {
         check_workflow_integrity
     fi
 
+    # --remove-env only needs the status file (plus optionally --repo-path to
+    # regenerate the workflow in the site repo clone)
+    if [ -n "$REMOVE_ENV" ]; then
+        if [ ${#ENV_SPECS[@]} -gt 0 ]; then
+            log "ERROR" "--remove-env cannot be combined with --env"
+            usage
+        fi
+        if [ -z "$STATUS_FILE" ]; then
+            if [ -n "$REPO_SLUG" ]; then
+                STATUS_FILE="$(default_ci_status_file "$REPO_SLUG")" || exit 1
+            else
+                log "ERROR" "--remove-env needs --repo ORG/REPO or --status-file"
+                usage
+            fi
+        fi
+        if [ ! -f "$STATUS_FILE" ]; then
+            log "ERROR" "Status file not found: $STATUS_FILE"
+            exit 1
+        fi
+        check_prerequisites
+        remove_environment
+    fi
+
     check_prerequisites
     prompt_for_missing_inputs
     parse_env_specs
@@ -946,6 +1189,7 @@ main() {
     resolve_repo
     init_status_file
     check_aws_config
+    merge_existing_envs
 
     if ! confirm_action "Proceed with CI setup?"; then
         log "INFO" "CI setup cancelled"
