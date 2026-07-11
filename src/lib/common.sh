@@ -111,6 +111,13 @@ default_redirect_status_file() {
 	echo "${dir}/.deploy-status-redirect-${target_domain}.json"
 }
 
+# CI status files are keyed by the GitHub repo slug (org/repo), slash → dash.
+default_ci_status_file() {
+	local repo_slug="$1" dir
+	dir="$(config_dir)" || return 1
+	echo "${dir}/.ci-status-${repo_slug//\//-}.json"
+}
+
 # find_zone_for_domain DOMAIN [AWS_PROFILE]
 #
 # Walk labels from longest to shortest looking up each suffix as a Route53

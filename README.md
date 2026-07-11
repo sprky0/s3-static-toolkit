@@ -212,6 +212,75 @@ aws cloudfront create-invalidation --distribution-id YOUR_DISTRIBUTION_ID --path
 The distribution ID is provided in the deployment summary and also stored in the status file.
 
 
+## CI: Push-to-Deploy via GitHub Actions
+
+Once one or more sites are deployed, `setup-ci.sh` wires an external site repository
+(the repo holding your actual docroot) to a push-to-deploy pipeline. See `CI_PLAN.md`
+for the full design. Auth is GitHub OIDC — no AWS keys are stored in GitHub, ever.
+
+```
+src/setup-ci.sh --repo-path <path> --env <name>=<domain> [--env ...] [options]
+Options:
+  --repo-path PATH         Local clone of the site repository (prompted if omitted)
+  --repo ORG/REPO          GitHub repo slug (default: derived from the clone's origin remote)
+  --env NAME=DOMAIN        Environment mapping, repeatable (prompted if omitted).
+                           NAME is both the GitHub environment and its deploy branch;
+                           DOMAIN must have a deploy-site.sh status file in config/
+  --docroot PATH           Directory inside the site repo to sync (default: .)
+  --region REGION          AWS region variable for the workflow (default: us-east-1)
+  --profile PROFILE        AWS CLI profile (optional)
+  --status-file FILE       Custom CI status file path
+                           (default: config/.ci-status-<org>-<repo>.json)
+  --no-approval            Skip adding a required reviewer on the 'production' environment
+  --check                  Only verify the generated workflow still matches the
+                           recorded sha256, then exit (0 ok, 1 modified/missing)
+  --yes                    Skip all confirmation prompts
+```
+
+Example — three environments, each a separate toolkit deployment:
+
+```bash
+src/setup-ci.sh --repo-path ~/gits/my-site \
+    --env integration=integration.example.com \
+    --env stage=stage.example.com \
+    --env production=example.com
+```
+
+**Branch == environment.** Pushing to branch `production` deploys the `production`
+environment, and so on. The mapping is enforced by each GitHub Environment's
+deployment-branch policy (set by the script), not by the workflow file — editing the
+workflow in the site repo can't aim a branch at the wrong environment.
+
+For each environment the script provisions:
+
+- An **IAM role** (`gha-deploy-<domain>`) trusted only by OIDC tokens minted for
+  `repo:<org>/<repo>:environment:<name>`, permitted only to sync that environment's
+  bucket and invalidate its distribution. Requires `gh` (authenticated) and the AWS CLI.
+- A **GitHub Environment** carrying `AWS_ROLE_ARN`, `AWS_REGION`, `S3_BUCKET`, and
+  `CLOUDFRONT_DISTRIBUTION_ID`, restricted to its same-named branch. The `production`
+  environment gets you as a required reviewer by default (deploys pause for approval).
+- A **bucket versioning check** — the workflow uses `s3 sync --delete`, so versioning
+  is the rollback story; the script offers to enable it where it's off.
+
+It then generates a single `.github/workflows/deploy.yml` in the site repo (you commit
+it) and records its sha256 in the CI status file. The output is deterministic, so:
+
+```bash
+src/setup-ci.sh --check --repo org/repo   # exit 0 = intact, 1 = modified or missing
+```
+
+tells you whether anyone has edited the workflow in the site repo since it was
+generated. Re-runs also warn before overwriting a drifted file.
+
+Teardown mirrors the rest of the toolkit — prints a full plan, then removes the IAM
+roles and GitHub environments (the shared OIDC provider, the sites themselves, and the
+committed workflow file are deliberately left alone):
+
+```bash
+src/remove-ci.sh --repo org/repo
+```
+
+
 ## Considerations and Limitations
 
 - **CloudFront Distribution Removal**: When removing resources, CloudFront distributions need to be disabled first and can take 5-10 minutes to complete.
