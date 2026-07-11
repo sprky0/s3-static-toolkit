@@ -189,7 +189,11 @@ prompt_for_missing_inputs() {
         echo -e "${CYAN}Define environments. The name is both the GitHub environment and its${NC}"
         echo -e "${CYAN}deploy branch (e.g. integration, stage, production). Blank name to finish.${NC}"
         while true; do
-            echo -en "${YELLOW}Environment name: ${NC}"
+            if [ ${#ENV_SPECS[@]} -eq 0 ]; then
+                echo -en "${YELLOW}Environment name: ${NC}"
+            else
+                echo -en "${YELLOW}Environment name (blank to finish): ${NC}"
+            fi
             read -r env_name
             [ -z "$env_name" ] && break
             echo -en "${YELLOW}Deployed domain for '$env_name': ${NC}"
