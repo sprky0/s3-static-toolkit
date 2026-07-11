@@ -798,10 +798,21 @@ jobs:
 
       - name: Sync docroot to S3
         run: |
+          # Two passes: assets get a day of browser cache; HTML gets
+          # no-cache so browsers revalidate (304) on every load.
           aws s3 sync "__DOCROOT__" "s3://${{ vars.S3_BUCKET }}" \
             --delete \
             --exclude ".git/*" \
-            --exclude ".github/*"
+            --exclude ".github/*" \
+            --exclude "*.html" \
+            --cache-control "public, max-age=86400"
+          aws s3 sync "__DOCROOT__" "s3://${{ vars.S3_BUCKET }}" \
+            --delete \
+            --exclude "*" \
+            --include "*.html" \
+            --exclude ".git/*" \
+            --exclude ".github/*" \
+            --cache-control "no-cache"
 
       - name: Invalidate CloudFront cache
         run: |
