@@ -780,7 +780,7 @@ jobs:
     environment: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || github.ref_name }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # Optional build, off by default (manual dispatch only).
       # Customize the commands for your toolchain.
@@ -791,7 +791,7 @@ jobs:
           npm run build
 
       - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v5
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
