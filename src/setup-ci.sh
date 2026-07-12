@@ -37,7 +37,9 @@ REPO_PATH=""
 REPO_SLUG=""
 ENV_SPECS=()
 DOCROOT="."
+DOCROOT_SET=false
 AWS_REGION="us-east-1"
+REGION_SET=false
 AWS_PROFILE=""
 STATUS_FILE=""
 NO_APPROVAL=false
@@ -67,8 +69,10 @@ usage() {
     echo "  --remove-env NAME        Remove one environment from an existing setup (deletes its"
     echo "                           IAM role and GitHub environment, regenerates the workflow;"
     echo "                           other environments are untouched). Needs --repo or --status-file"
-    echo "  --docroot PATH           Directory inside the site repo to sync (default: .)"
-    echo "  --region REGION          AWS region variable for the workflow (default: us-east-1)"
+    echo "  --docroot PATH           Directory inside the site repo to sync (default: the"
+    echo "                           value recorded by a previous run, or .)"
+    echo "  --region REGION          AWS region variable for the workflow (default: the"
+    echo "                           value recorded by a previous run, or us-east-1)"
     echo "  --profile PROFILE        AWS CLI profile (optional)"
     echo "  --status-file FILE       Custom CI status file path"
     echo "                           (default: config/.ci-status-<org>-<repo>.json)"
@@ -129,6 +133,31 @@ get_status() {
         fi
     fi
     echo "$default"
+}
+
+# Re-runs are amendments: settings recorded by a previous run win over script
+# defaults, and an explicit command-line flag wins over both. Without this, an
+# amend re-run that omits --docroot would silently regenerate the workflow with
+# the default "." and clobber the recorded value (this broke denormal.audio
+# production on 2026-07-12).
+recall_stored_settings() {
+    local stored
+
+    if [ "$DOCROOT_SET" != true ]; then
+        stored=$(get_status "docroot" "")
+        if [ -n "$stored" ] && [ "$stored" != "$DOCROOT" ]; then
+            DOCROOT="$stored"
+            log "INFO" "Recalled docroot from previous run: $DOCROOT"
+        fi
+    fi
+
+    if [ "$REGION_SET" != true ]; then
+        stored=$(get_status "region" "")
+        if [ -n "$stored" ] && [ "$stored" != "$AWS_REGION" ]; then
+            AWS_REGION="$stored"
+            log "INFO" "Recalled region from previous run: $AWS_REGION"
+        fi
+    fi
 }
 
 is_step_completed() {
@@ -996,8 +1025,12 @@ remove_environment() {
     done
     REPO_PATH="${REPO_PATH:-$(get_status "repo_path" "")}"
     REPO_PATH="${REPO_PATH/#\~/$HOME}"
-    DOCROOT=$(get_status "docroot" "$DOCROOT")
-    AWS_REGION=$(get_status "region" "$AWS_REGION")
+    if [ "$DOCROOT_SET" != true ]; then
+        DOCROOT=$(get_status "docroot" "$DOCROOT")
+    fi
+    if [ "$REGION_SET" != true ]; then
+        AWS_REGION=$(get_status "region" "$AWS_REGION")
+    fi
     if [ -n "$REPO_PATH" ] && [ -d "$REPO_PATH" ]; then
         generate_workflow
         log "INFO" "Commit the updated workflow in the site repo."
@@ -1092,11 +1125,13 @@ main() {
                 ;;
             --docroot)
                 DOCROOT="$2"
+                DOCROOT_SET=true
                 shift
                 shift
                 ;;
             --region)
                 AWS_REGION="$2"
+                REGION_SET=true
                 shift
                 shift
                 ;;
@@ -1199,6 +1234,7 @@ main() {
 
     resolve_repo
     init_status_file
+    recall_stored_settings
     check_aws_config
     merge_existing_envs
 
