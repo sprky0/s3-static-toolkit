@@ -20,6 +20,10 @@ USE_GZIP=false
 EXCLUDE_PATTERN=""
 DRY_RUN=false
 DOMAIN=""
+# HTML revalidates on every request (304 when unchanged); other assets are
+# not content-hashed, so cap their browser cache at a day.
+HTML_CACHE_CONTROL="no-cache"
+ASSET_CACHE_CONTROL="public, max-age=86400"
 
 # Function to display usage information
 usage() {
@@ -207,17 +211,24 @@ sync_to_s3() {
   log "INFO" "Syncing files from $local_dir to S3 bucket $bucket_name..."
   
   if confirm "Sync files to S3 bucket '$bucket_name'?"; then
-    # Prepare S3 sync command
-    local cmd="aws s3 sync \"$local_dir\" s3://$bucket_name/ --delete $AWS_PROFILE_ARG $AWS_REGION_ARG"
-    
-    # Add exclude pattern if specified
-    if [ -n "$EXCLUDE_PATTERN" ]; then
-      cmd="$cmd --exclude \"$EXCLUDE_PATTERN\""
-    fi
-    
+    # Two sync passes so HTML gets a different Cache-Control than other
+    # assets (s3 sync applies a single value per run): assets first, then
+    # HTML only.
+    local common_args="$AWS_PROFILE_ARG $AWS_REGION_ARG"
+
     # Add dry-run flag if specified
     if [ "$DRY_RUN" = true ]; then
-      cmd="$cmd --dryrun"
+      common_args="$common_args --dryrun"
+    fi
+
+    local cmd="aws s3 sync \"$local_dir\" s3://$bucket_name/ --delete --exclude \"*.html\" --cache-control \"$ASSET_CACHE_CONTROL\" $common_args"
+    local html_cmd="aws s3 sync \"$local_dir\" s3://$bucket_name/ --delete --exclude \"*\" --include \"*.html\" --cache-control \"$HTML_CACHE_CONTROL\" $common_args"
+
+    # Add exclude pattern if specified (appended last so it takes
+    # precedence over --include \"*.html\" in the HTML pass)
+    if [ -n "$EXCLUDE_PATTERN" ]; then
+      cmd="$cmd --exclude \"$EXCLUDE_PATTERN\""
+      html_cmd="$html_cmd --exclude \"$EXCLUDE_PATTERN\""
     fi
     
     if [ "$USE_GZIP" = true ]; then
@@ -243,9 +254,14 @@ sync_to_s3() {
           mv "$file.gz" "$file"
           
           # Update file metadata for S3 upload
+          local cache_control="$ASSET_CACHE_CONTROL"
+          case $file in
+            *.html) cache_control="$HTML_CACHE_CONTROL" ;;
+          esac
           aws s3 cp "$file" "s3://$bucket_name/${file#$temp_dir/}" \
             --content-type "$content_type" \
             --content-encoding "gzip" \
+            --cache-control "$cache_control" \
             --metadata-directive "REPLACE" \
             $AWS_PROFILE_ARG $AWS_REGION_ARG $([ "$DRY_RUN" = true ] && echo "--dryrun")
         else
@@ -258,8 +274,8 @@ sync_to_s3() {
       rm -rf "$temp_dir"
       log "INFO" "Removed temporary directory"
     else
-      # Execute S3 sync command
-      eval "$cmd"
+      # Execute S3 sync passes (assets first, then HTML)
+      eval "$cmd" && eval "$html_cmd"
     fi
     
     if [ $? -ne 0 ]; then

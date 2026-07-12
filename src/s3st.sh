@@ -36,6 +36,7 @@ show_help() {
 	echo -e "${CYAN}Groups:${NC}"
 	echo -e "  ${GREEN}site${NC}      ${DIM}deploy/sync/remove a static site${NC}"
 	echo -e "  ${GREEN}redirect${NC}  ${DIM}deploy/remove a multi-domain redirect stack${NC}"
+	echo -e "  ${GREEN}ci${NC}        ${DIM}setup/remove GitHub Actions CI for a deployed site${NC}"
 	echo
 	echo -e "${CYAN}Quality-of-life flags (runner-level):${NC}"
 	echo -e "  ${GREEN}--yes${NC} / ${GREEN}-y${NC}   ${DIM}Auto-inject confirmation bypass${NC}"
@@ -44,9 +45,12 @@ show_help() {
 	echo -e "${CYAN}Examples:${NC}"
 	echo -e "  s3st site deploy --domain example.com --profile myaws"
 	echo -e "  s3st site sync --domain example.com --source ./dist --yes --dry"
+	echo -e "  s3st site import --domain example.com --dry"
 	echo -e "  s3st site remove --domain example.com --yes"
 	echo -e "  s3st redirect deploy --source-domains a.com,b.com --target-domain t.com --yes"
 	echo -e "  s3st redirect remove --status-file config/.deploy-status-redirect-t.com.json --yes"
+	echo -e "  s3st ci setup --repo-path ../mysite --env production=example.com --yes"
+	echo -e "  s3st ci remove --repo org/mysite --yes"
 	print_footer
 }
 
@@ -98,6 +102,17 @@ case "$GROUP" in
 					fi
 					safe_exit $?
 					;;
+				import)
+					ARGS=()
+					if [[ "$GLOBAL_YES" == true ]]; then ARGS+=("--yes"); fi
+					if [[ "$GLOBAL_DRY" == true ]]; then ARGS+=("--dry-run"); fi
+					if (( ${#ARGS[@]} > 0 )); then
+						bash "$S3ST_DIR/import-site.sh" "${ARGS[@]}" "$@"
+					else
+						bash "$S3ST_DIR/import-site.sh" "$@"
+					fi
+					safe_exit $?
+					;;
 				remove|rm|cleanup)
 					ARGS=()
 					if [[ "$GLOBAL_YES" == true ]]; then ARGS+=("--yes"); fi
@@ -110,11 +125,12 @@ case "$GROUP" in
 					;;
 				""|-h|--help|help)
 					print_header "s3st site"
-					echo -e "${BOLD}Usage:${NC} s3st site <deploy|sync|remove> [args...]"
+					echo -e "${BOLD}Usage:${NC} s3st site <deploy|sync|import|remove> [args...]"
 					echo
 					echo -e "${CYAN}Commands:${NC}"
 					echo -e "  ${GREEN}deploy${NC}   Deploy a static site stack (S3 + CloudFront + ACM + Route53)"
 					echo -e "  ${GREEN}sync${NC}     Sync a local folder to the site bucket and invalidate CloudFront"
+					echo -e "  ${GREEN}import${NC}   Reconstitute a status file from already-live infrastructure"
 					echo -e "  ${GREEN}remove${NC}   Remove the deployed site resources from the status file"
 					print_footer
 					safe_exit 0
@@ -141,6 +157,13 @@ case "$GROUP" in
 					bash "$S3ST_DIR/sync.sh" $EXTRA "$@"
 					safe_exit $?
 					;;
+				import)
+					EXTRA=""
+					if [ "$GLOBAL_YES" = true ]; then EXTRA="$EXTRA --yes"; fi
+					if [ "$GLOBAL_DRY" = true ]; then EXTRA="$EXTRA --dry-run"; fi
+					bash "$S3ST_DIR/import-site.sh" $EXTRA "$@"
+					safe_exit $?
+					;;
 				remove|rm|cleanup)
 					EXTRA=""
 					if [ "$GLOBAL_YES" = true ]; then EXTRA="--yes"; fi
@@ -149,11 +172,12 @@ case "$GROUP" in
 					;;
 				""|-h|--help|help)
 					print_header "s3st site"
-					echo -e "${BOLD}Usage:${NC} s3st site <deploy|sync|remove> [args...]"
+					echo -e "${BOLD}Usage:${NC} s3st site <deploy|sync|import|remove> [args...]"
 					echo
 					echo -e "${CYAN}Commands:${NC}"
 					echo -e "  ${GREEN}deploy${NC}   Deploy a static site stack (S3 + CloudFront + ACM + Route53)"
 					echo -e "  ${GREEN}sync${NC}     Sync a local folder to the site bucket and invalidate CloudFront"
+					echo -e "  ${GREEN}import${NC}   Reconstitute a status file from already-live infrastructure"
 					echo -e "  ${GREEN}remove${NC}   Remove the deployed site resources from the status file"
 					print_footer
 					safe_exit 0
@@ -235,6 +259,80 @@ case "$GROUP" in
 				*)
 					echo -e "${RED}Unknown redirect command:${NC} $CMD" >&2
 					echo -e "Try: ${CYAN}s3st redirect --help${NC}" >&2
+					safe_exit 1
+					;;
+			esac
+		fi
+		;;
+	ci)
+		CMD="${1:-}"; shift || true
+		if [ -n "${BASH_VERSION:-}" ]; then
+			declare -a ARGS=()
+			case "$CMD" in
+				setup)
+					ARGS=()
+					if [[ "$GLOBAL_YES" == true ]]; then ARGS+=("--yes"); fi
+					if (( ${#ARGS[@]} > 0 )); then
+						bash "$S3ST_DIR/setup-ci.sh" "${ARGS[@]}" "$@"
+					else
+						bash "$S3ST_DIR/setup-ci.sh" "$@"
+					fi
+					safe_exit $?
+					;;
+				remove|rm|cleanup)
+					ARGS=()
+					if [[ "$GLOBAL_YES" == true ]]; then ARGS+=("--yes"); fi
+					if (( ${#ARGS[@]} > 0 )); then
+						bash "$S3ST_DIR/remove-ci.sh" "${ARGS[@]}" "$@"
+					else
+						bash "$S3ST_DIR/remove-ci.sh" "$@"
+					fi
+					safe_exit $?
+					;;
+				""|-h|--help|help)
+					print_header "s3st ci"
+					echo -e "${BOLD}Usage:${NC} s3st ci <setup|remove> [args...]"
+					echo
+					echo -e "${CYAN}Commands:${NC}"
+					echo -e "  ${GREEN}setup${NC}    Set up GitHub Actions CI (OIDC role + workflow) for a site repo"
+					echo -e "  ${GREEN}remove${NC}   Remove the CI resources (IAM role, secrets, environments)"
+					print_footer
+					safe_exit 0
+					;;
+				*)
+					echo -e "${RED}Unknown ci command:${NC} $CMD" >&2
+					echo -e "Try: ${CYAN}s3st ci --help${NC}" >&2
+					safe_exit 1
+					;;
+			esac
+		else
+			# Not bash: fallback to positional passing (no arrays)
+			case "$CMD" in
+				setup)
+					EXTRA=""
+					if [ "$GLOBAL_YES" = true ]; then EXTRA="--yes"; fi
+					bash "$S3ST_DIR/setup-ci.sh" $EXTRA "$@"
+					safe_exit $?
+					;;
+				remove|rm|cleanup)
+					EXTRA=""
+					if [ "$GLOBAL_YES" = true ]; then EXTRA="--yes"; fi
+					bash "$S3ST_DIR/remove-ci.sh" $EXTRA "$@"
+					safe_exit $?
+					;;
+				""|-h|--help|help)
+					print_header "s3st ci"
+					echo -e "${BOLD}Usage:${NC} s3st ci <setup|remove> [args...]"
+					echo
+					echo -e "${CYAN}Commands:${NC}"
+					echo -e "  ${GREEN}setup${NC}    Set up GitHub Actions CI (OIDC role + workflow) for a site repo"
+					echo -e "  ${GREEN}remove${NC}   Remove the CI resources (IAM role, secrets, environments)"
+					print_footer
+					safe_exit 0
+					;;
+				*)
+					echo -e "${RED}Unknown ci command:${NC} $CMD" >&2
+					echo -e "Try: ${CYAN}s3st ci --help${NC}" >&2
 					safe_exit 1
 					;;
 			esac

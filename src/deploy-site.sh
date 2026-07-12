@@ -1177,8 +1177,8 @@ EOF
 EOF
     
     # Upload files to S3
-    $aws_cmd s3 cp "$index_file" "s3://${bucket_name}/index.html" --content-type "text/html"
-    $aws_cmd s3 cp "$error_file" "s3://${bucket_name}/error.html" --content-type "text/html"
+    $aws_cmd s3 cp "$index_file" "s3://${bucket_name}/index.html" --content-type "text/html" --cache-control "no-cache"
+    $aws_cmd s3 cp "$error_file" "s3://${bucket_name}/error.html" --content-type "text/html" --cache-control "no-cache"
     
     rm -f "$index_file" "$error_file"
     

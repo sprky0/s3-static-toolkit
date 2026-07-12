@@ -48,6 +48,7 @@ what a good idea I certainly didn't think of that midway through working on this
    - **OAC** rules limit provide access to the CF instance
 - **Automatic DNS configuration** via Route53
 - **Status tracking** for error recovery and resource management
+- **Config import** to reconstitute a status file from already-live infrastructure
 - **Complete cleanup tool** to remove all created resources
 - **Limited humor** because honestly we are all on a deadline here people, a script toolkit doesn't need to be making fun of us the **entire** fucking time
 
@@ -152,6 +153,44 @@ Options:
 ```
 
 
+### Import (reconstitute a config from live infra)
+
+If a site was deployed manually (or its status file was lost), `import-site.sh`
+rebuilds the `.deploy-status-<domain>.json` by inspecting the live resources.
+Discovery is anchored on the CloudFront distribution whose alias matches the
+domain; the bucket, OAC, certificate, and any viewer-request function are read
+out of the distribution config — so non-convention bucket names import
+correctly. The hosted zone, DNS alias record, bucket contents, scoped IAM user,
+and live HTTP response are each verified, and only verified steps are marked
+completed. The resulting file works with `sync.sh`, `remove-site.sh`,
+`setup-ci.sh`, and re-runs of `deploy-site.sh`.
+
+```
+Usage: ./import-site.sh --domain yourdomain.com [options]
+Options:
+  --domain DOMAIN          Domain name (required)
+  --profile PROFILE        AWS CLI profile (optional)
+  --region REGION          AWS region (default: us-east-1)
+  --distribution-id ID     CloudFront distribution ID (optional; only
+                           needed when the distribution cannot be found
+                           by its alias)
+  --status-file FILE       Custom status file path
+                           (default: {repo-root}/config/.deploy-status-<domain>.json)
+  --dry-run                Print the reconstituted config to stdout
+                           without writing the status file
+  --yes                    Skip confirmation prompts (including
+                           overwriting an existing status file)
+  --help                   Display this help message
+```
+
+Or via the runner: `s3st site import --domain example.com --dry` (drop `--dry`
+to write the file). All AWS calls are read-only; the only thing it writes is
+the status file. Steps that can't be verified (e.g. an empty bucket, a cert
+still pending, DNS pointing elsewhere) are left incomplete with a warning, and
+a follow-up `deploy-site.sh` run will fill the gaps. Note that function
+behavior flags (`clean_urls`, `basic_auth_users`) and scoped-user secrets
+cannot be recovered from live infra and are not recorded.
+
 ### Cleanup
 
 When you no longer need the static site, you can remove all resources with either the
@@ -225,9 +264,14 @@ Options:
   --repo ORG/REPO          GitHub repo slug (default: derived from the clone's origin remote)
   --env NAME=DOMAIN        Environment mapping, repeatable (prompted if omitted).
                            NAME is both the GitHub environment and its deploy branch;
-                           DOMAIN must have a deploy-site.sh status file in config/
-  --docroot PATH           Directory inside the site repo to sync (default: .)
-  --region REGION          AWS region variable for the workflow (default: us-east-1)
+                           DOMAIN must have a deploy-site.sh status file in config/.
+                           Re-runs merge: previously configured environments are kept
+  --remove-env NAME        Remove one environment (IAM role + GitHub environment) and
+                           regenerate the workflow; other environments are untouched
+  --docroot PATH           Directory inside the site repo to sync (default: the
+                           value recorded by a previous run, or .)
+  --region REGION          AWS region variable for the workflow (default: the
+                           value recorded by a previous run, or us-east-1)
   --profile PROFILE        AWS CLI profile (optional)
   --status-file FILE       Custom CI status file path
                            (default: config/.ci-status-<org>-<repo>.json)
@@ -271,6 +315,31 @@ src/setup-ci.sh --check --repo org/repo   # exit 0 = intact, 1 = modified or mis
 
 tells you whether anyone has edited the workflow in the site repo since it was
 generated. Re-runs also warn before overwriting a drifted file.
+
+**Amending over time.** Re-runs are additive, so you can wire environments up as
+they're ready — stage first, production when it exists:
+
+```bash
+# later, after example.com is deployed — stage is kept automatically:
+src/setup-ci.sh --repo-path ~/gits/my-site --env production=example.com
+```
+
+Environments recorded in the CI status file are carried forward without being
+touched (existing roles are skipped, GitHub settings converge idempotently), and the
+workflow regenerates as the union — commit it and merge it into the new branch.
+Existing deploy branches keep working throughout: GitHub runs the workflow copy on
+the pushed branch, so nothing depends on the amendment landing everywhere at once.
+Re-specifying an existing environment with a *different* domain re-points it after a
+confirmation (the old domain's IAM role is deleted so it can't linger with access to
+the old bucket). To drop a single environment without touching the rest:
+
+```bash
+src/setup-ci.sh --remove-env stage --repo org/repo
+```
+
+deletes that environment's IAM role and GitHub environment, regenerates the workflow
+without its branch, and reminds you to delete the branch itself (its own workflow
+copy would otherwise still trigger on push).
 
 Teardown mirrors the rest of the toolkit — prints a full plan, then removes the IAM
 roles and GitHub environments (the shared OIDC provider, the sites themselves, and the
