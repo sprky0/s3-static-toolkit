@@ -424,6 +424,14 @@ main() {
     log "ERROR" "Gzip compression requested but gzip command not found"
     exit 1
   fi
+
+  # Refuse to sync against a status file recorded under a different AWS
+  # account (wrong profile) — the bucket and distribution would belong to
+  # someone else's stack.
+  if ! require_account_match "$STATUS_FILE" "${AWS_PROFILE:-}"; then
+    log "ERROR" "Re-run with the matching --profile."
+    exit 1
+  fi
   
   # Get S3 bucket name from status file
   BUCKET_NAME=$(get_metadata "create_s3_bucket" "bucket_name")

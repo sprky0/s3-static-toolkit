@@ -81,22 +81,23 @@ check_aws_config() {
         aws_cmd="aws --profile $PROFILE"
     fi
     
-    if ! $aws_cmd sts get-caller-identity &> /dev/null; then
-        log "ERROR" "AWS credentials are not configured correctly."
-        log "ERROR" "Please run 'aws configure' or provide a valid profile."
+    # Refuse to resume a status file recorded under a different AWS account
+    # (wrong profile) — the bucket/certificate recorded there would not exist
+    # for the current caller.
+    if ! require_account_match "$STATUS_FILE" "$PROFILE"; then
+        log "ERROR" "Re-run with the matching --profile, or remove the status file to start over."
         exit 1
     fi
-    
-    local account_id=$($aws_cmd sts get-caller-identity --query Account --output text)
+
     local user=$($aws_cmd sts get-caller-identity --query Arn --output text)
 
     log "INFO" "AWS credentials configured correctly."
-    log "INFO" "AWS Account: $account_id"
+    log "INFO" "AWS Account: $CALLER_ACCOUNT_ID"
     log "INFO" "AWS User: $user"
     log "INFO" "AWS Region: $REGION"
 
     # Persist account_id so remove-redirect.sh can verify bucket ownership.
-    update_status "account_id" "$account_id"
+    update_status "account_id" "$CALLER_ACCOUNT_ID"
 }
 
 # Initialize or load status file

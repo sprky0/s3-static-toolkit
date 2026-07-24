@@ -120,21 +120,28 @@ confirm_action() {
 check_aws_config() {
     log "STEP" "Checking AWS CLI configuration"
 
-    local aws_cmd="aws"
-    if [ -n "$AWS_PROFILE" ]; then
-        aws_cmd="$aws_cmd --profile $AWS_PROFILE"
-    fi
-
-    if ! $aws_cmd sts get-caller-identity &> /dev/null; then
-        log "ERROR" "AWS CLI is not configured correctly"
-        log "INFO" "Please run 'aws configure' or check your credentials and try again."
+    # Empty status-file argument: only validate credentials here. Re-importing
+    # under a different account is legitimate (that is what import is for) but
+    # easy to do by accident, so it gets a warning + confirmation below rather
+    # than the hard abort the deploy/sync/remove scripts use.
+    if ! require_account_match "" "$AWS_PROFILE"; then
         exit 1
     fi
 
-    local account_id=$($aws_cmd sts get-caller-identity --query "Account" --output text)
-    log "SUCCESS" "AWS CLI is configured correctly (Account ID: $account_id)"
+    if [ -f "$STATUS_FILE" ]; then
+        local existing_account=$(jq -r '.account_id // ""' "$STATUS_FILE" 2>/dev/null)
+        if [ -n "$existing_account" ] && [ "$existing_account" != "$CALLER_ACCOUNT_ID" ]; then
+            log "WARN" "Existing status file records account $existing_account but you are authenticated to $CALLER_ACCOUNT_ID."
+            if ! confirm_action "Import from account $CALLER_ACCOUNT_ID anyway?"; then
+                log "INFO" "Import cancelled. Switch profile and retry."
+                exit 0
+            fi
+        fi
+    fi
 
-    update_status "account_id" "$account_id"
+    log "SUCCESS" "AWS CLI is configured correctly (Account ID: $CALLER_ACCOUNT_ID)"
+
+    update_status "account_id" "$CALLER_ACCOUNT_ID"
 }
 
 discover_hosted_zone() {

@@ -37,12 +37,14 @@ show_help() {
 	echo -e "  ${GREEN}site${NC}      ${DIM}deploy/sync/remove a static site${NC}"
 	echo -e "  ${GREEN}redirect${NC}  ${DIM}deploy/remove a multi-domain redirect stack${NC}"
 	echo -e "  ${GREEN}ci${NC}        ${DIM}setup/remove GitHub Actions CI for a deployed site${NC}"
+	echo -e "  ${GREEN}list${NC}      ${DIM}list known configs (sites, redirects, CI) with statuses${NC}"
 	echo
 	echo -e "${CYAN}Quality-of-life flags (runner-level):${NC}"
 	echo -e "  ${GREEN}--yes${NC} / ${GREEN}-y${NC}   ${DIM}Auto-inject confirmation bypass${NC}"
 	echo -e "  ${GREEN}--dry${NC}          ${DIM}Alias for --dry-run when calling sync${NC}"
 	echo
 	echo -e "${CYAN}Examples:${NC}"
+	echo -e "  s3st list"
 	echo -e "  s3st site deploy --domain example.com --profile myaws"
 	echo -e "  s3st site sync --domain example.com --source ./dist --yes --dry"
 	echo -e "  s3st site import --domain example.com --dry"
@@ -76,6 +78,10 @@ GROUP="$1"; shift
 
 # Defensive: Only use bash arrays if running under bash, otherwise fallback to sh/zsh-safe positional passing
 case "$GROUP" in
+	list|ls|status)
+		bash "$S3ST_DIR/list-sites.sh" "$@"
+		safe_exit $?
+		;;
 	site)
 		CMD="${1:-}"; shift || true
 		if [ -n "${BASH_VERSION:-}" ]; then

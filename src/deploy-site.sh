@@ -143,23 +143,20 @@ validate_basic_auth_csv() {
 # Function to check AWS CLI configuration
 check_aws_config() {
     log "STEP" "Checking AWS CLI configuration"
-    
-    local aws_cmd="aws"
-    if [ -n "$AWS_PROFILE" ]; then
-        aws_cmd="$aws_cmd --profile $AWS_PROFILE"
-    fi
-    
-    if ! $aws_cmd sts get-caller-identity &> /dev/null; then
-        log "ERROR" "AWS CLI is not configured correctly"
-        log "INFO" "Please run 'aws configure' or check your credentials and try again."
+
+    # Refuse to resume a status file recorded under a different AWS account
+    # (wrong profile) — resources like the OAC and bucket would not exist for
+    # the current caller, so the deploy would fail or split the stack across
+    # accounts.
+    if ! require_account_match "$STATUS_FILE" "$AWS_PROFILE"; then
+        log "INFO" "Re-run with the matching --profile, or remove the status file to start over."
         exit 1
     fi
-    
-    local account_id=$($aws_cmd sts get-caller-identity --query "Account" --output text)
-    log "SUCCESS" "AWS CLI is configured correctly (Account ID: $account_id)"
-    
+
+    log "SUCCESS" "AWS CLI is configured correctly (Account ID: $CALLER_ACCOUNT_ID)"
+
     # Store account ID in status file
-    update_status "account_id" "$account_id"
+    update_status "account_id" "$CALLER_ACCOUNT_ID"
 }
 
 # Function to initialize or load status file

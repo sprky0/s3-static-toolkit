@@ -118,6 +118,42 @@ default_ci_status_file() {
 	echo "${dir}/.ci-status-${repo_slug//\//-}.json"
 }
 
+# require_account_match STATUS_FILE [AWS_PROFILE]
+#
+# Guard against operating on a status file that was created under a different
+# AWS account than the current caller (i.e. authenticated with the wrong
+# profile). Resolves the caller's account via STS and compares it to the
+# account_id recorded in STATUS_FILE, when both exist. An empty/missing
+# STATUS_FILE or a status file without account_id only validates credentials.
+#
+# On success sets the global CALLER_ACCOUNT_ID and returns 0. Returns 1 on
+# credential failure or account mismatch. Call directly and `|| exit 1` — do
+# NOT invoke via command substitution (the global assignment and log output
+# must reach the parent shell).
+require_account_match() {
+	local status_file="${1:-}"
+	local aws_profile="${2:-}"
+	local aws_cmd="aws"
+	[[ -n "$aws_profile" ]] && aws_cmd="aws --profile $aws_profile"
+
+	if ! CALLER_ACCOUNT_ID=$($aws_cmd sts get-caller-identity --query Account --output text 2>/dev/null); then
+		log_error "Cannot determine current AWS account. Check credentials/profile${aws_profile:+ ($aws_profile)}."
+		return 1
+	fi
+
+	local status_account=""
+	if [[ -n "$status_file" && -f "$status_file" ]]; then
+		status_account=$(jq -r '.account_id // ""' "$status_file" 2>/dev/null) || status_account=""
+	fi
+
+	if [[ -n "$status_account" && "$status_account" != "null" && "$status_account" != "$CALLER_ACCOUNT_ID" ]]; then
+		log_error "Status file records account ${status_account} but you are authenticated to ${CALLER_ACCOUNT_ID}${aws_profile:+ (profile: $aws_profile)}."
+		log_error "Refusing to mix accounts. Switch profile and retry. ($status_file)"
+		return 1
+	fi
+	return 0
+}
+
 # find_zone_for_domain DOMAIN [AWS_PROFILE]
 #
 # Walk labels from longest to shortest looking up each suffix as a Route53
